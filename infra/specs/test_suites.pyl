@@ -759,7 +759,7 @@
         'args': [
           '--log=debug',
           'interpret',
-          'trex_200',
+          'among_us:dota_underlords:genshin_impact:manhattan_10:trex_200',
           '-L=2',
           '--show-test-stdout',
         ],
@@ -1287,15 +1287,9 @@
     'win10_intel_gtests': [
       'angle_deqp_gles2_d3d11_gtests',
       'angle_end2end_gtests',
+      'angle_gles1_conformance_gtests',
       'angle_unit_gtests',
       'angle_white_box_gtests',
-    ],
-
-    'win10_intel_isolated_scripts': [
-      'angle_perf_smoke_isolated_scripts',
-      'angle_trace_interpreter_isolated_scripts',
-      'angle_trace_perf_native_smoke_isolated_scripts',
-      'angle_trace_perf_vulkan_smoke_isolated_scripts',
     ],
 
     'win10_nvidia_gtests': [

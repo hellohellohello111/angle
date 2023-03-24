@@ -155,6 +155,13 @@ class FramebufferVk : public FramebufferImpl
 
     const QueueSerial &getLastRenderPassQueueSerial() const { return mLastRenderPassQueueSerial; }
 
+    bool hasAnyExternalAttachments() const { return mIsExternalColorAttachments.any(); }
+
+    bool hasFrontBufferUsage() const
+    {
+        return (mAttachmentHasFrontBufferUsage & mState.getColorAttachmentsMask()).any();
+    }
+
     enum class RenderTargetImage
     {
         AttachmentImage,
@@ -300,7 +307,11 @@ class FramebufferVk : public FramebufferImpl
     bool mReadOnlyDepthFeedbackLoopMode;
     bool mReadOnlyStencilFeedbackLoopMode;
 
-    gl::DrawBufferMask mIsAHBColorAttachments;
+    // Whether any of the color attachments are an external image such as dmabuf, AHB etc.  In such
+    // cases, some optimizations are disabled such as deferred clears because the results need to be
+    // made externally available.
+    gl::DrawBufferMask mIsExternalColorAttachments;
+    gl::DrawBufferMask mAttachmentHasFrontBufferUsage;
 
     bool mIsCurrentFramebufferCached;
 

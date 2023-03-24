@@ -428,7 +428,7 @@ angle::Result FramebufferVk::invalidateSub(const gl::Context *context,
     // glCopyTex[Sub]Image, shader storage image, etc).
     redeferClears(contextVk);
 
-    if (contextVk->hasStartedRenderPass() &&
+    if (contextVk->hasActiveRenderPass() &&
         rotatedInvalidateArea.encloses(contextVk->getStartedRenderPassCommands().getRenderArea()))
     {
         // Because the render pass's render area is within the invalidated area, it is fine for
@@ -523,14 +523,12 @@ angle::Result FramebufferVk::clearImpl(const gl::Context *context,
     bool clearDepthWithDraw   = clearDepth && scissoredClear;
     bool clearStencilWithDraw = clearStencil && (maskedClearStencil || scissoredClear);
 
-    const bool isMidRenderPassClear = contextVk->hasStartedRenderPassWithCommands();
-
+    const bool isMidRenderPassClear = contextVk->hasActiveRenderPassWithCommands();
     if (isMidRenderPassClear)
     {
         // If a render pass is open with commands, it must be for this framebuffer.  Otherwise,
         // either FramebufferVk::syncState() or ContextVk::syncState() would have closed it.
         ASSERT(contextVk->hasStartedRenderPassWithQueueSerial(mLastRenderPassQueueSerial));
-
         // Emit debug-util markers for this mid-render-pass clear
         ANGLE_TRY(
             contextVk->handleGraphicsEventLog(rx::GraphicsEventCmdBuf::InRenderPassCmdBufQueryCmd));
@@ -613,14 +611,14 @@ angle::Result FramebufferVk::clearImpl(const gl::Context *context,
         }
         else
         {
-            if (contextVk->hasStartedRenderPass())
+            if (contextVk->hasActiveRenderPass())
             {
                 // Typically, clears are deferred such that it's impossible to have a render pass
                 // opened without any additional commands recorded on it.  This is not true for some
-                // corner cases, such as with 3D or AHB attachments.  In those cases, a clear can
-                // open a render pass that's otherwise empty, and additional clears can continue to
-                // be accumulated in the render pass loadOps.
-                ASSERT(isAnyAttachment3DWithoutAllLayers || mIsAHBColorAttachments.any());
+                // corner cases, such as with 3D or external attachments.  In those cases, a clear
+                // can open a render pass that's otherwise empty, and additional clears can continue
+                // to be accumulated in the render pass loadOps.
+                ASSERT(isAnyAttachment3DWithoutAllLayers || hasAnyExternalAttachments());
                 clearWithLoadOp(contextVk);
             }
 
@@ -634,10 +632,10 @@ angle::Result FramebufferVk::clearImpl(const gl::Context *context,
             // clear may later need to be flushed with vkCmdClearColorImage, which cannot partially
             // clear the 3D texture.  In that case, the clears are flushed immediately too.
             //
-            // For imported images such as from AHBs, the clears are not deferred so that they are
+            // For external images such as from AHBs, the clears are not deferred so that they are
             // definitely applied before the application uses them outside of the control of ANGLE.
             if (clearAnyWithDraw || isAnyAttachment3DWithoutAllLayers ||
-                mIsAHBColorAttachments.any())
+                hasAnyExternalAttachments())
             {
                 ANGLE_TRY(flushDeferredClears(contextVk));
             }
@@ -673,7 +671,7 @@ angle::Result FramebufferVk::clearImpl(const gl::Context *context,
          clearDepthWithDraw || (clearStencilWithDraw && !maskedClearStencil)) &&
         !preferDrawOverClearAttachments)
     {
-        if (!contextVk->hasStartedRenderPass())
+        if (!contextVk->hasActiveRenderPass())
         {
             // Start a new render pass if necessary to record the commands.
             vk::RenderPassCommandBuffer *commandBuffer;
@@ -1314,11 +1312,6 @@ angle::Result FramebufferVk::blit(const gl::Context *context,
             // TODO(https://anglebug.com/7553): Look into optimization below in order to remove the
             //  check of whether the current framebuffer is valid.
             bool isCurrentFramebufferValid = srcFramebufferVk->mCurrentFramebuffer.valid();
-            if (isCurrentFramebufferValid)
-            {
-                contextVk->restoreFinishedRenderPass(
-                    srcFramebufferVk->getLastRenderPassQueueSerial());
-            }
 
             // glBlitFramebuffer() needs to copy the read color attachment to all enabled
             // attachments in the draw framebuffer, but Vulkan requires a 1:1 relationship for
@@ -1849,8 +1842,11 @@ angle::Result FramebufferVk::updateColorAttachment(const gl::Context *context,
     if (enabledColor)
     {
         mCurrentFramebufferDesc.updateColor(colorIndexGL, renderTarget->getDrawSubresourceSerial());
-        const bool isCreatedWithAHB = mState.getColorAttachments()[colorIndexGL].isCreatedWithAHB();
-        mIsAHBColorAttachments.set(colorIndexGL, isCreatedWithAHB);
+        const bool isExternalImage =
+            mState.getColorAttachments()[colorIndexGL].isExternalImageWithoutIndividualSync();
+        mIsExternalColorAttachments.set(colorIndexGL, isExternalImage);
+        mAttachmentHasFrontBufferUsage.set(
+            colorIndexGL, mState.getColorAttachments()[colorIndexGL].hasFrontBufferUsage());
     }
     else
     {
@@ -2620,7 +2616,7 @@ void FramebufferVk::redeferClears(ContextVk *contextVk)
     // exceptional occasion in blit where the read framebuffer accumulates deferred clears, it can
     // be deferred while this assumption doesn't hold (and redeferClearsForReadFramebuffer should be
     // used instead).
-    ASSERT(!contextVk->hasStartedRenderPass() || !mDeferredClears.any());
+    ASSERT(!contextVk->hasActiveRenderPass() || !mDeferredClears.any());
     redeferClearsImpl(contextVk);
 }
 
@@ -2711,7 +2707,7 @@ void FramebufferVk::clearWithCommand(ContextVk *contextVk,
             clears->reset(colorIndexGL);
             ++contextVk->getPerfCounters().colorClearAttachments;
 
-            renderPassCommands->onColorAccess(colorIndexVk, vk::ResourceAccess::Write);
+            renderPassCommands->onColorAccess(colorIndexVk, vk::ResourceAccess::ReadWrite);
         }
         ++colorIndexVk;
     }
@@ -2725,7 +2721,7 @@ void FramebufferVk::clearWithCommand(ContextVk *contextVk,
     {
         dsAspectFlags |= VK_IMAGE_ASPECT_DEPTH_BIT;
         // Explicitly mark a depth write because we are clearing the depth buffer.
-        renderPassCommands->onDepthAccess(vk::ResourceAccess::Write);
+        renderPassCommands->onDepthAccess(vk::ResourceAccess::ReadWrite);
         clears->reset(vk::kUnpackedDepthIndex);
         ++contextVk->getPerfCounters().depthClearAttachments;
     }
@@ -2734,7 +2730,7 @@ void FramebufferVk::clearWithCommand(ContextVk *contextVk,
     {
         dsAspectFlags |= VK_IMAGE_ASPECT_STENCIL_BIT;
         // Explicitly mark a stencil write because we are clearing the stencil buffer.
-        renderPassCommands->onStencilAccess(vk::ResourceAccess::Write);
+        renderPassCommands->onStencilAccess(vk::ResourceAccess::ReadWrite);
         clears->reset(vk::kUnpackedStencilIndex);
         ++contextVk->getPerfCounters().stencilClearAttachments;
     }

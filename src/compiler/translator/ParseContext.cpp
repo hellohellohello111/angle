@@ -1329,7 +1329,9 @@ bool TParseContext::declareVariable(const TSourceLoc &line,
     {
         case EvqClipDistance:
         case EvqCullDistance:
+        case EvqFragDepth:
         case EvqLastFragData:
+        case EvqLastFragColor:
             symbolType = SymbolType::BuiltIn;
             break;
         default:
@@ -1398,6 +1400,14 @@ bool TParseContext::declareVariable(const TSourceLoc &line,
             return false;
         }
     }
+    else if (identifier.beginsWith("gl_LastFragColorARM"))
+    {
+        // gl_LastFragColorARM may be redeclared with a new precision qualifier
+        if (const TSymbol *builtInSymbol = symbolTable.findBuiltIn(identifier, mShaderVersion))
+        {
+            needsReservedCheck = !checkCanUseOneOfExtensions(line, builtInSymbol->extensions());
+        }
+    }
     else if (type->isArray() && identifier == "gl_ClipDistance")
     {
         // gl_ClipDistance can be redeclared with smaller size than gl_MaxClipDistances
@@ -1458,6 +1468,17 @@ bool TParseContext::declareVariable(const TSourceLoc &line,
                   identifier);
             return false;
         }
+    }
+    else if (isExtensionEnabled(TExtension::EXT_conservative_depth) &&
+             mShaderType == GL_FRAGMENT_SHADER && identifier == "gl_FragDepth")
+    {
+        if (type->getBasicType() != EbtFloat || type->getNominalSize() != 1 ||
+            type->getSecondarySize() != 1 || type->isArray())
+        {
+            error(line, "gl_FragDepth can only be redeclared as float", identifier);
+            return false;
+        }
+        needsReservedCheck = false;
     }
     else if (isExtensionEnabled(TExtension::EXT_separate_shader_objects) &&
              mShaderType == GL_VERTEX_SHADER)
@@ -1659,6 +1680,11 @@ void TParseContext::declarationQualifierErrorCheck(const sh::TQualifier qualifie
         error(location, "layout qualifier only valid for interface blocks",
               getBlockStorageString(layoutQualifier.blockStorage));
         return;
+    }
+
+    if (qualifier != EvqFragDepth)
+    {
+        checkDepthIsNotSpecified(location, layoutQualifier.depth);
     }
 
     if (qualifier == EvqFragmentOut)
@@ -2244,6 +2270,15 @@ void TParseContext::checkAttributeLocationInRange(const TSourceLoc &location,
     }
 }
 
+void TParseContext::checkDepthIsNotSpecified(const TSourceLoc &location, TLayoutDepth depth)
+{
+    if (depth != EdUnspecified)
+    {
+        error(location, "invalid layout qualifier: only valid on gl_FragDepth",
+              getDepthString(depth));
+    }
+}
+
 void TParseContext::checkYuvIsNotSpecified(const TSourceLoc &location, bool yuv)
 {
     if (yuv != false)
@@ -2576,19 +2611,42 @@ TIntermTyped *TParseContext::parseVariableIdentifier(const TSourceLoc &location,
     return node;
 }
 
-void TParseContext::adjustRedeclaredBuiltInType(const ImmutableString &identifier, TType *type)
+void TParseContext::adjustRedeclaredBuiltInType(const TSourceLoc &line,
+                                                const ImmutableString &identifier,
+                                                TType *type)
 {
     if (identifier == "gl_ClipDistance")
     {
+        const TQualifier qualifier = type->getQualifier();
+        if ((mShaderType == GL_VERTEX_SHADER &&
+             !(qualifier == EvqVertexOut || qualifier == EvqVaryingOut)) ||
+            (mShaderType == GL_FRAGMENT_SHADER && qualifier != EvqFragmentIn))
+        {
+            error(line, "invalid or missing storage qualifier", identifier);
+            return;
+        }
+
         type->setQualifier(EvqClipDistance);
     }
     else if (identifier == "gl_CullDistance")
     {
+        const TQualifier qualifier = type->getQualifier();
+        if ((mShaderType == GL_VERTEX_SHADER && qualifier != EvqVertexOut) ||
+            (mShaderType == GL_FRAGMENT_SHADER && qualifier != EvqFragmentIn))
+        {
+            error(line, "invalid or missing storage qualifier", identifier);
+            return;
+        }
+
         type->setQualifier(EvqCullDistance);
     }
     else if (identifier == "gl_LastFragData")
     {
         type->setQualifier(EvqLastFragData);
+    }
+    else if (identifier == "gl_LastFragColorARM")
+    {
+        type->setQualifier(EvqLastFragColor);
     }
     else if (identifier == "gl_Position")
     {
@@ -3242,10 +3300,23 @@ TIntermDeclaration *TParseContext::parseSingleDeclaration(
         }
     }
 
+    if (identifier == "gl_FragDepth")
+    {
+        if (type->getQualifier() == EvqFragmentOut)
+        {
+            type->setQualifier(EvqFragDepth);
+        }
+        else
+        {
+            error(identifierOrTypeLocation,
+                  "gl_FragDepth can only be redeclared as fragment output", identifier);
+        }
+    }
+
     checkGeometryShaderInputAndSetArraySize(identifierOrTypeLocation, identifier, type);
     checkTessellationShaderUnsizedArraysAndSetSize(identifierOrTypeLocation, identifier, type);
 
-    declarationQualifierErrorCheck(publicType.qualifier, publicType.layoutQualifier,
+    declarationQualifierErrorCheck(type->getQualifier(), publicType.layoutQualifier,
                                    identifierOrTypeLocation);
 
     bool emptyDeclaration                  = (identifier == "");
@@ -3288,7 +3359,7 @@ TIntermDeclaration *TParseContext::parseSingleDeclaration(
         }
     }
 
-    adjustRedeclaredBuiltInType(identifier, type);
+    adjustRedeclaredBuiltInType(identifierOrTypeLocation, identifier, type);
 
     TIntermDeclaration *declaration = new TIntermDeclaration();
     declaration->setLine(identifierOrTypeLocation);
@@ -3333,7 +3404,7 @@ TIntermDeclaration *TParseContext::parseSingleArrayDeclaration(
         checkAtomicCounterOffsetAlignment(identifierLocation, *arrayType);
     }
 
-    adjustRedeclaredBuiltInType(identifier, arrayType);
+    adjustRedeclaredBuiltInType(identifierLocation, identifier, arrayType);
 
     TIntermDeclaration *declaration = new TIntermDeclaration();
     declaration->setLine(identifierLocation);
@@ -3509,7 +3580,7 @@ void TParseContext::parseDeclarator(TPublicType &publicType,
         checkAtomicCounterOffsetAlignment(identifierLocation, *type);
     }
 
-    adjustRedeclaredBuiltInType(identifier, type);
+    adjustRedeclaredBuiltInType(identifierLocation, identifier, type);
 
     TVariable *variable = nullptr;
     if (declareVariable(identifierLocation, identifier, type, &variable))
@@ -3554,7 +3625,7 @@ void TParseContext::parseArrayDeclarator(TPublicType &elementType,
             checkAtomicCounterOffsetAlignment(identifierLocation, *arrayType);
         }
 
-        adjustRedeclaredBuiltInType(identifier, arrayType);
+        adjustRedeclaredBuiltInType(identifierLocation, identifier, arrayType);
 
         TVariable *variable = nullptr;
         if (declareVariable(identifierLocation, identifier, arrayType, &variable))
@@ -3943,6 +4014,8 @@ void TParseContext::parseGlobalLayoutQualifier(const TTypeQualifierBuilder &type
 
     checkInternalFormatIsNotSpecified(typeQualifier.line, layoutQualifier.imageInternalFormat);
 
+    checkDepthIsNotSpecified(typeQualifier.line, layoutQualifier.depth);
+
     checkYuvIsNotSpecified(typeQualifier.line, layoutQualifier.yuv);
 
     checkOffsetIsNotSpecified(typeQualifier.line, layoutQualifier.offset);
@@ -4233,7 +4306,7 @@ TIntermFunctionPrototype *TParseContext::addFunctionPrototypeDeclaration(
     // function is declared multiple times.
     bool hadPrototypeDeclaration = false;
     const TFunction *function    = symbolTable.markFunctionHasPrototypeDeclaration(
-           parsedFunction.getMangledName(), &hadPrototypeDeclaration);
+        parsedFunction.getMangledName(), &hadPrototypeDeclaration);
 
     if (hadPrototypeDeclaration && mShaderVersion == 100)
     {
@@ -4777,6 +4850,7 @@ TIntermDeclaration *TParseContext::addInterfaceBlock(
                                  typeQualifier.layoutQualifier.binding, arraySize);
     }
 
+    checkDepthIsNotSpecified(typeQualifier.line, typeQualifier.layoutQualifier.depth);
     checkYuvIsNotSpecified(typeQualifier.line, typeQualifier.layoutQualifier.yuv);
     checkEarlyFragmentTestsIsNotSpecified(typeQualifier.line,
                                           typeQualifier.layoutQualifier.earlyFragmentTests);
@@ -5724,6 +5798,22 @@ TLayoutQualifier TParseContext::parseLayoutQualifier(const ImmutableString &qual
         else if (qualifierType == "blend_support_all_equations")
         {
             qualifier.advancedBlendEquations.setAll();
+        }
+        else if (qualifierType == "depth_any")
+        {
+            qualifier.depth = EdAny;
+        }
+        else if (qualifierType == "depth_greater")
+        {
+            qualifier.depth = EdGreater;
+        }
+        else if (qualifierType == "depth_less")
+        {
+            qualifier.depth = EdLess;
+        }
+        else if (qualifierType == "depth_unchanged")
+        {
+            qualifier.depth = EdUnchanged;
         }
         else
         {

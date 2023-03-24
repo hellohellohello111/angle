@@ -1192,6 +1192,10 @@ const char *GetEntryPointName(EntryPoint ep)
             return "glFramebufferPixelLocalClearValueivANGLE";
         case EntryPoint::GLFramebufferPixelLocalClearValueuivANGLE:
             return "glFramebufferPixelLocalClearValueuivANGLE";
+        case EntryPoint::GLFramebufferPixelLocalStorageInterruptANGLE:
+            return "glFramebufferPixelLocalStorageInterruptANGLE";
+        case EntryPoint::GLFramebufferPixelLocalStorageRestoreANGLE:
+            return "glFramebufferPixelLocalStorageRestoreANGLE";
         case EntryPoint::GLFramebufferRenderbuffer:
             return "glFramebufferRenderbuffer";
         case EntryPoint::GLFramebufferRenderbufferOES:
@@ -1374,8 +1378,12 @@ const char *GetEntryPointName(EntryPoint ep)
             return "glGetFramebufferParameterivRobustANGLE";
         case EntryPoint::GLGetFramebufferPixelLocalStorageParameterfvANGLE:
             return "glGetFramebufferPixelLocalStorageParameterfvANGLE";
+        case EntryPoint::GLGetFramebufferPixelLocalStorageParameterfvRobustANGLE:
+            return "glGetFramebufferPixelLocalStorageParameterfvRobustANGLE";
         case EntryPoint::GLGetFramebufferPixelLocalStorageParameterivANGLE:
             return "glGetFramebufferPixelLocalStorageParameterivANGLE";
+        case EntryPoint::GLGetFramebufferPixelLocalStorageParameterivRobustANGLE:
+            return "glGetFramebufferPixelLocalStorageParameterivRobustANGLE";
         case EntryPoint::GLGetGraphicsResetStatus:
             return "glGetGraphicsResetStatus";
         case EntryPoint::GLGetGraphicsResetStatusEXT:
@@ -2266,6 +2274,8 @@ const char *GetEntryPointName(EntryPoint ep)
             return "glPolygonOffset";
         case EntryPoint::GLPolygonOffsetClamp:
             return "glPolygonOffsetClamp";
+        case EntryPoint::GLPolygonOffsetClampEXT:
+            return "glPolygonOffsetClampEXT";
         case EntryPoint::GLPolygonOffsetx:
             return "glPolygonOffsetx";
         case EntryPoint::GLPolygonStipple:

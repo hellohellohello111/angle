@@ -1085,9 +1085,8 @@ static bool IsValidES3CopyTexImageCombination(const InternalFormat &textureForma
         return false;
     }
 
-    // SNORM is not supported (e.g. is not in the tables of "effective internal format" that
-    // correspond to internal formats.
-    if (textureFormatInfo.componentType == GL_SIGNED_NORMALIZED)
+    if ((textureFormatInfo.componentType == GL_SIGNED_NORMALIZED) !=
+        (framebufferFormatInfo.componentType == GL_SIGNED_NORMALIZED))
     {
         return false;
     }
@@ -3741,7 +3740,7 @@ bool ValidateVertexAttribIPointer(const Context *context,
 
 bool ValidateGetSynciv(const Context *context,
                        angle::EntryPoint entryPoint,
-                       GLsync sync,
+                       SyncID syncPacked,
                        GLenum pname,
                        GLsizei bufSize,
                        const GLsizei *length,
@@ -3775,7 +3774,7 @@ bool ValidateGetSynciv(const Context *context,
         }
     }
 
-    Sync *syncObject = context->getSync(sync);
+    Sync *syncObject = context->getSync(syncPacked);
     if (!syncObject)
     {
         context->validationError(entryPoint, GL_INVALID_VALUE, kSyncMissing);
@@ -4749,7 +4748,7 @@ bool ValidateFenceSync(const Context *context,
     return true;
 }
 
-bool ValidateIsSync(const Context *context, angle::EntryPoint entryPoint, GLsync sync)
+bool ValidateIsSync(const Context *context, angle::EntryPoint entryPoint, SyncID syncPacked)
 {
     if ((context->getClientMajorVersion() < 3) && !context->getExtensions().syncARB)
     {
@@ -4760,7 +4759,7 @@ bool ValidateIsSync(const Context *context, angle::EntryPoint entryPoint, GLsync
     return true;
 }
 
-bool ValidateDeleteSync(const Context *context, angle::EntryPoint entryPoint, GLsync sync)
+bool ValidateDeleteSync(const Context *context, angle::EntryPoint entryPoint, SyncID syncPacked)
 {
     if ((context->getClientMajorVersion() < 3) && !context->getExtensions().syncARB)
     {
@@ -4768,7 +4767,7 @@ bool ValidateDeleteSync(const Context *context, angle::EntryPoint entryPoint, GL
         return false;
     }
 
-    if (sync != static_cast<GLsync>(0) && !context->getSync(sync))
+    if (syncPacked.value != 0 && !context->getSync(syncPacked))
     {
         context->validationError(entryPoint, GL_INVALID_VALUE, kSyncMissing);
         return false;
@@ -4779,7 +4778,7 @@ bool ValidateDeleteSync(const Context *context, angle::EntryPoint entryPoint, GL
 
 bool ValidateClientWaitSync(const Context *context,
                             angle::EntryPoint entryPoint,
-                            GLsync sync,
+                            SyncID syncPacked,
                             GLbitfield flags,
                             GLuint64 timeout)
 {
@@ -4795,7 +4794,7 @@ bool ValidateClientWaitSync(const Context *context,
         return false;
     }
 
-    Sync *clientWaitSync = context->getSync(sync);
+    Sync *clientWaitSync = context->getSync(syncPacked);
     if (!clientWaitSync)
     {
         context->validationError(entryPoint, GL_INVALID_VALUE, kSyncMissing);
@@ -4807,7 +4806,7 @@ bool ValidateClientWaitSync(const Context *context,
 
 bool ValidateWaitSync(const Context *context,
                       angle::EntryPoint entryPoint,
-                      GLsync sync,
+                      SyncID syncPacked,
                       GLbitfield flags,
                       GLuint64 timeout)
 {
@@ -4829,7 +4828,7 @@ bool ValidateWaitSync(const Context *context,
         return false;
     }
 
-    Sync *waitSync = context->getSync(sync);
+    Sync *waitSync = context->getSync(syncPacked);
     if (!waitSync)
     {
         context->validationError(entryPoint, GL_INVALID_VALUE, kSyncMissing);
@@ -5293,6 +5292,12 @@ bool ValidateDrawBufferIndexIfActivePLS(const Context *context,
     int numPLSPlanes = context->getState().getPixelLocalStorageActivePlanes();
     if (numPLSPlanes != 0)
     {
+        // INVALID_OPERATION is generated ... if any of the following are true:
+        //
+        //   <drawBufferIdx> >= MAX_COLOR_ATTACHMENTS_WITH_ACTIVE_PIXEL_LOCAL_STORAGE_ANGLE
+        //   <drawBufferIdx> >= (MAX_COMBINED_DRAW_BUFFERS_AND_PIXEL_LOCAL_STORAGE_PLANES_ANGLE -
+        //                       ACTIVE_PIXEL_LOCAL_STORAGE_PLANES_ANGLE)
+        //
         if (drawBufferIdx >= context->getCaps().maxColorAttachmentsWithActivePixelLocalStorage)
         {
             context->validationErrorF(entryPoint, GL_INVALID_OPERATION,

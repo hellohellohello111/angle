@@ -3174,6 +3174,7 @@ bool GetQueryParameterInfo(const State &glState,
         case GL_TEXTURE_BINDING_2D:
         case GL_TEXTURE_BINDING_CUBE_MAP:
         case GL_RESET_NOTIFICATION_STRATEGY_EXT:
+        case GL_QUERY_COUNTER_BITS_EXT:
         {
             *type      = GL_INT;
             *numParams = 1;
@@ -3243,6 +3244,16 @@ bool GetQueryParameterInfo(const State &glState,
             *numParams = 1;
             return true;
         }
+        case GL_DEPTH_CLAMP_EXT:
+        {
+            if (!extensions.depthClampEXT)
+            {
+                return false;
+            }
+            *type      = GL_BOOL;
+            *numParams = 1;
+            return true;
+        }
         case GL_COLOR_LOGIC_OP:
         {
             if (!extensions.logicOpANGLE)
@@ -3269,6 +3280,14 @@ bool GetQueryParameterInfo(const State &glState,
             *numParams = 1;
             return true;
         }
+        case GL_POLYGON_OFFSET_CLAMP_EXT:
+            if (!extensions.polygonOffsetClampEXT)
+            {
+                return false;
+            }
+            *type      = GL_FLOAT;
+            *numParams = 1;
+            return true;
         case GL_ALIASED_LINE_WIDTH_RANGE:
         case GL_ALIASED_POINT_SIZE_RANGE:
         case GL_DEPTH_RANGE:
@@ -3325,6 +3344,14 @@ bool GetQueryParameterInfo(const State &glState,
             *numParams = 1;
             return true;
         case GL_MAX_CLIP_DISTANCES_EXT:  // case GL_MAX_CLIP_PLANES
+        case GL_CLIP_DISTANCE0_EXT:
+        case GL_CLIP_DISTANCE1_EXT:
+        case GL_CLIP_DISTANCE2_EXT:
+        case GL_CLIP_DISTANCE3_EXT:
+        case GL_CLIP_DISTANCE4_EXT:
+        case GL_CLIP_DISTANCE5_EXT:
+        case GL_CLIP_DISTANCE6_EXT:
+        case GL_CLIP_DISTANCE7_EXT:
             if (clientMajorVersion < 2)
             {
                 break;
@@ -3335,7 +3362,7 @@ bool GetQueryParameterInfo(const State &glState,
                 // to GL_MAX_CLIP_PLANES which is a valid enum.
                 return false;
             }
-            *type      = GL_INT;
+            *type      = (pname == GL_MAX_CLIP_DISTANCES_EXT) ? GL_INT : GL_BOOL;
             *numParams = 1;
             return true;
         case GL_MAX_CULL_DISTANCES_EXT:
@@ -3635,6 +3662,14 @@ bool GetQueryParameterInfo(const State &glState,
     if (extensions.provokingVertexANGLE && pname == GL_PROVOKING_VERTEX_ANGLE)
     {
         *type      = GL_INT;
+        *numParams = 1;
+        return true;
+    }
+
+    if (extensions.shaderFramebufferFetchARM &&
+        (pname == GL_FETCH_PER_SAMPLE_ARM || pname == GL_FRAGMENT_SHADER_FRAMEBUFFER_FETCH_MRT_ARM))
+    {
+        *type      = GL_BOOL;
         *numParams = 1;
         return true;
     }
@@ -4497,19 +4532,20 @@ egl::Error SetSurfaceAttrib(Surface *surface, EGLint attribute, EGLint value)
     return NoError();
 }
 
-Error GetSyncAttrib(Display *display, Sync *sync, EGLint attribute, EGLint *value)
+Error GetSyncAttrib(Display *display, SyncID sync, EGLint attribute, EGLint *value)
 {
+    const egl::Sync *syncObj = display->getSync(sync);
     switch (attribute)
     {
         case EGL_SYNC_TYPE_KHR:
-            *value = sync->getType();
+            *value = syncObj->getType();
             return NoError();
 
         case EGL_SYNC_STATUS_KHR:
-            return sync->getStatus(display, value);
+            return syncObj->getStatus(display, value);
 
         case EGL_SYNC_CONDITION_KHR:
-            *value = sync->getCondition();
+            *value = syncObj->getCondition();
             return NoError();
 
         default:

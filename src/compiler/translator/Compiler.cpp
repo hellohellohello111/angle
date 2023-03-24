@@ -9,7 +9,12 @@
 #include <sstream>
 
 #include "angle_gl.h"
-#include "common/utilities.h"
+
+#include "common/BinaryStream.h"
+#include "common/CompiledShaderState.h"
+#include "common/PackedEnums.h"
+#include "common/angle_version_info.h"
+
 #include "compiler/translator/CallDAG.h"
 #include "compiler/translator/CollectVariables.h"
 #include "compiler/translator/Initialize.h"
@@ -181,7 +186,8 @@ bool RemoveInvariant(sh::GLenum shaderType,
                      ShShaderOutput outputType,
                      const ShCompileOptions &compileOptions)
 {
-    if (shaderType == GL_FRAGMENT_SHADER && IsGLSL420OrNewer(outputType))
+    if (shaderType == GL_FRAGMENT_SHADER &&
+        (IsGLSL420OrNewer(outputType) || IsOutputVulkan(outputType)))
         return true;
 
     if (compileOptions.removeInvariantAndCentroidForESSL3 && shaderVersion >= 300 &&
@@ -625,6 +631,47 @@ unsigned int TCompiler::getSharedMemorySize() const
     return sharedMemSize;
 }
 
+bool TCompiler::getShaderBinary(const ShHandle compilerHandle,
+                                const char *const shaderStrings[],
+                                size_t numStrings,
+                                const ShCompileOptions &compileOptions,
+                                ShaderBinaryBlob *const binaryOut)
+{
+    if (!compile(shaderStrings, numStrings, compileOptions))
+    {
+        return false;
+    }
+
+    gl::BinaryOutputStream stream;
+    gl::ShaderType shaderType = gl::FromGLenum<gl::ShaderType>(mShaderType);
+    gl::CompiledShaderState state(shaderType);
+    state.buildCompiledShaderState(compilerHandle, IsOutputVulkan(mOutputType));
+
+    stream.writeBytes(
+        reinterpret_cast<const unsigned char *>(angle::GetANGLEShaderProgramVersion()),
+        angle::GetANGLEShaderProgramVersionHashSize());
+    stream.writeEnum(shaderType);
+    stream.writeEnum(mOutputType);
+
+    // Serialize the full source string for the shader. Ignore the source path if it is provided.
+    std::string sourceString;
+    size_t startingIndex = compileOptions.sourcePath ? 1 : 0;
+    for (size_t i = startingIndex; i < numStrings; ++i)
+    {
+        sourceString.append(shaderStrings[i]);
+    }
+    stream.writeString(sourceString);
+
+    stream.writeBytes(reinterpret_cast<const uint8_t *>(&compileOptions), sizeof(compileOptions));
+    stream.writeBytes(reinterpret_cast<const uint8_t *>(&mResources), sizeof(mResources));
+
+    state.serialize(stream);
+
+    ASSERT(binaryOut);
+    *binaryOut = std::move(stream.getData());
+    return true;
+}
+
 bool TCompiler::validateAST(TIntermNode *root)
 {
     if (mCompileOptions.validateAST)
@@ -846,10 +893,10 @@ bool TCompiler::checkAndSimplifyAST(TIntermBlock *root,
         parseContext.isExtensionEnabled(TExtension::EXT_clip_cull_distance) ||
         parseContext.isExtensionEnabled(TExtension::APPLE_clip_distance))
     {
-        if (!ValidateClipCullDistance(root, &mDiagnostics, mResources.MaxCullDistances,
-                                      mResources.MaxCombinedClipAndCullDistances,
-                                      &mClipDistanceSize, &mCullDistanceSize,
-                                      &mClipDistanceMaxIndex, &mCullDistanceMaxIndex))
+        if (!ValidateClipCullDistance(
+                root, &mDiagnostics, mResources.MaxCullDistances,
+                mResources.MaxCombinedClipAndCullDistances, &mClipDistanceSize, &mCullDistanceSize,
+                &mClipDistanceRedeclared, &mCullDistanceRedeclared, &mClipDistanceUsed))
         {
             return false;
         }
@@ -1170,15 +1217,15 @@ bool TCompiler::checkAndSimplifyAST(TIntermBlock *root,
 
 bool TCompiler::resizeClipAndCullDistanceBuiltins(TIntermBlock *root)
 {
-    auto resizeVariable = [=](const ImmutableString &name, int maxIndex, int maxSize) {
+    auto resizeVariable = [=](const ImmutableString &name, uint32_t size, uint32_t maxSize) {
         // Skip if the variable is not used or implicitly has the maximum size
-        if (maxIndex == -1 || maxIndex + 1 == maxSize)
+        if (size == 0 || size == maxSize)
             return true;
-        ASSERT(maxIndex >= 0 && maxIndex + 1 < maxSize);
+        ASSERT(size < maxSize);
         const TVariable *builtInVar =
             static_cast<const TVariable *>(mSymbolTable.findBuiltIn(name, getShaderVersion()));
         TType *resizedType = new TType(builtInVar->getType());
-        resizedType->setArraySize(0, maxIndex + 1);
+        resizedType->setArraySize(0, size);
 
         TVariable *resizedVar =
             new TVariable(&mSymbolTable, name, resizedType, SymbolType::BuiltIn);
@@ -1186,16 +1233,14 @@ bool TCompiler::resizeClipAndCullDistanceBuiltins(TIntermBlock *root)
         return ReplaceVariable(this, root, builtInVar, resizedVar);
     };
 
-    if (mClipDistanceSize == 0 &&
-        !resizeVariable(ImmutableString("gl_ClipDistance"), mClipDistanceMaxIndex,
-                        mResources.MaxClipDistances))
+    if (!mClipDistanceRedeclared && !resizeVariable(ImmutableString("gl_ClipDistance"),
+                                                    mClipDistanceSize, mResources.MaxClipDistances))
     {
         return false;
     }
 
-    if (mCullDistanceSize == 0 &&
-        !resizeVariable(ImmutableString("gl_CullDistance"), mCullDistanceMaxIndex,
-                        mResources.MaxCullDistances))
+    if (!mCullDistanceRedeclared && !resizeVariable(ImmutableString("gl_CullDistance"),
+                                                    mCullDistanceSize, mResources.MaxCullDistances))
     {
         return false;
     }
@@ -1347,6 +1392,7 @@ void TCompiler::setResourceString()
         << ":MaxCallStackDepth:" << mResources.MaxCallStackDepth
         << ":MaxFunctionParameters:" << mResources.MaxFunctionParameters
         << ":EXT_blend_func_extended:" << mResources.EXT_blend_func_extended
+        << ":EXT_conservative_depth:" << mResources.EXT_conservative_depth
         << ":EXT_frag_depth:" << mResources.EXT_frag_depth
         << ":EXT_primitive_bounding_box:" << mResources.EXT_primitive_bounding_box
         << ":OES_primitive_bounding_box:" << mResources.OES_primitive_bounding_box
@@ -1481,10 +1527,11 @@ void TCompiler::clearResults()
 
     mNumViews = -1;
 
-    mClipDistanceSize     = 0;
-    mCullDistanceSize     = 0;
-    mClipDistanceMaxIndex = -1;
-    mCullDistanceMaxIndex = -1;
+    mClipDistanceSize       = 0;
+    mCullDistanceSize       = 0;
+    mClipDistanceRedeclared = false;
+    mCullDistanceRedeclared = false;
+    mClipDistanceUsed       = false;
 
     mGeometryShaderInputPrimitiveType  = EptUndefined;
     mGeometryShaderOutputPrimitiveType = EptUndefined;

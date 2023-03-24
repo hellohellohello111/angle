@@ -585,12 +585,20 @@ ANGLE_UTIL_EXPORT PFNGLFRAMEBUFFERPIXELLOCALCLEARVALUEIVANGLEPROC
     l_glFramebufferPixelLocalClearValueivANGLE;
 ANGLE_UTIL_EXPORT PFNGLFRAMEBUFFERPIXELLOCALCLEARVALUEUIVANGLEPROC
     l_glFramebufferPixelLocalClearValueuivANGLE;
+ANGLE_UTIL_EXPORT PFNGLFRAMEBUFFERPIXELLOCALSTORAGEINTERRUPTANGLEPROC
+    l_glFramebufferPixelLocalStorageInterruptANGLE;
+ANGLE_UTIL_EXPORT PFNGLFRAMEBUFFERPIXELLOCALSTORAGERESTOREANGLEPROC
+    l_glFramebufferPixelLocalStorageRestoreANGLE;
 ANGLE_UTIL_EXPORT PFNGLFRAMEBUFFERTEXTUREPIXELLOCALSTORAGEANGLEPROC
     l_glFramebufferTexturePixelLocalStorageANGLE;
 ANGLE_UTIL_EXPORT PFNGLGETFRAMEBUFFERPIXELLOCALSTORAGEPARAMETERFVANGLEPROC
     l_glGetFramebufferPixelLocalStorageParameterfvANGLE;
+ANGLE_UTIL_EXPORT PFNGLGETFRAMEBUFFERPIXELLOCALSTORAGEPARAMETERFVROBUSTANGLEPROC
+    l_glGetFramebufferPixelLocalStorageParameterfvRobustANGLE;
 ANGLE_UTIL_EXPORT PFNGLGETFRAMEBUFFERPIXELLOCALSTORAGEPARAMETERIVANGLEPROC
     l_glGetFramebufferPixelLocalStorageParameterivANGLE;
+ANGLE_UTIL_EXPORT PFNGLGETFRAMEBUFFERPIXELLOCALSTORAGEPARAMETERIVROBUSTANGLEPROC
+    l_glGetFramebufferPixelLocalStorageParameterivRobustANGLE;
 ANGLE_UTIL_EXPORT PFNGLPIXELLOCALSTORAGEBARRIERANGLEPROC l_glPixelLocalStorageBarrierANGLE;
 ANGLE_UTIL_EXPORT PFNGLINVALIDATETEXTUREANGLEPROC l_glInvalidateTextureANGLE;
 ANGLE_UTIL_EXPORT PFNGLTEXIMAGE2DEXTERNALANGLEPROC l_glTexImage2DExternalANGLE;
@@ -680,6 +688,7 @@ ANGLE_UTIL_EXPORT PFNGLMULTIDRAWELEMENTSINDIRECTEXTPROC l_glMultiDrawElementsInd
 ANGLE_UTIL_EXPORT PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC
     l_glFramebufferTexture2DMultisampleEXT;
 ANGLE_UTIL_EXPORT PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC l_glRenderbufferStorageMultisampleEXT;
+ANGLE_UTIL_EXPORT PFNGLPOLYGONOFFSETCLAMPEXTPROC l_glPolygonOffsetClampEXT;
 ANGLE_UTIL_EXPORT PFNGLPRIMITIVEBOUNDINGBOXEXTPROC l_glPrimitiveBoundingBoxEXT;
 ANGLE_UTIL_EXPORT PFNGLGETGRAPHICSRESETSTATUSEXTPROC l_glGetGraphicsResetStatusEXT;
 ANGLE_UTIL_EXPORT PFNGLGETNUNIFORMFVEXTPROC l_glGetnUniformfvEXT;
@@ -1750,15 +1759,27 @@ void LoadUtilGLES(LoadProc loadProc)
     l_glFramebufferPixelLocalClearValueuivANGLE =
         reinterpret_cast<PFNGLFRAMEBUFFERPIXELLOCALCLEARVALUEUIVANGLEPROC>(
             loadProc("glFramebufferPixelLocalClearValueuivANGLE"));
+    l_glFramebufferPixelLocalStorageInterruptANGLE =
+        reinterpret_cast<PFNGLFRAMEBUFFERPIXELLOCALSTORAGEINTERRUPTANGLEPROC>(
+            loadProc("glFramebufferPixelLocalStorageInterruptANGLE"));
+    l_glFramebufferPixelLocalStorageRestoreANGLE =
+        reinterpret_cast<PFNGLFRAMEBUFFERPIXELLOCALSTORAGERESTOREANGLEPROC>(
+            loadProc("glFramebufferPixelLocalStorageRestoreANGLE"));
     l_glFramebufferTexturePixelLocalStorageANGLE =
         reinterpret_cast<PFNGLFRAMEBUFFERTEXTUREPIXELLOCALSTORAGEANGLEPROC>(
             loadProc("glFramebufferTexturePixelLocalStorageANGLE"));
     l_glGetFramebufferPixelLocalStorageParameterfvANGLE =
         reinterpret_cast<PFNGLGETFRAMEBUFFERPIXELLOCALSTORAGEPARAMETERFVANGLEPROC>(
             loadProc("glGetFramebufferPixelLocalStorageParameterfvANGLE"));
+    l_glGetFramebufferPixelLocalStorageParameterfvRobustANGLE =
+        reinterpret_cast<PFNGLGETFRAMEBUFFERPIXELLOCALSTORAGEPARAMETERFVROBUSTANGLEPROC>(
+            loadProc("glGetFramebufferPixelLocalStorageParameterfvRobustANGLE"));
     l_glGetFramebufferPixelLocalStorageParameterivANGLE =
         reinterpret_cast<PFNGLGETFRAMEBUFFERPIXELLOCALSTORAGEPARAMETERIVANGLEPROC>(
             loadProc("glGetFramebufferPixelLocalStorageParameterivANGLE"));
+    l_glGetFramebufferPixelLocalStorageParameterivRobustANGLE =
+        reinterpret_cast<PFNGLGETFRAMEBUFFERPIXELLOCALSTORAGEPARAMETERIVROBUSTANGLEPROC>(
+            loadProc("glGetFramebufferPixelLocalStorageParameterivRobustANGLE"));
     l_glPixelLocalStorageBarrierANGLE = reinterpret_cast<PFNGLPIXELLOCALSTORAGEBARRIERANGLEPROC>(
         loadProc("glPixelLocalStorageBarrierANGLE"));
     l_glInvalidateTextureANGLE =
@@ -1919,6 +1940,8 @@ void LoadUtilGLES(LoadProc loadProc)
     l_glRenderbufferStorageMultisampleEXT =
         reinterpret_cast<PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC>(
             loadProc("glRenderbufferStorageMultisampleEXT"));
+    l_glPolygonOffsetClampEXT =
+        reinterpret_cast<PFNGLPOLYGONOFFSETCLAMPEXTPROC>(loadProc("glPolygonOffsetClampEXT"));
     l_glPrimitiveBoundingBoxEXT =
         reinterpret_cast<PFNGLPRIMITIVEBOUNDINGBOXEXTPROC>(loadProc("glPrimitiveBoundingBoxEXT"));
     l_glGetGraphicsResetStatusEXT = reinterpret_cast<PFNGLGETGRAPHICSRESETSTATUSEXTPROC>(

@@ -232,6 +232,7 @@ class TracePerfTest : public ANGLERenderTest
     uint32_t mOffscreenFrameCount                                       = 0;
     uint32_t mTotalFrameCount                                           = 0;
     bool mScreenshotSaved                                               = false;
+    uint32_t mScreenshotFrame                                           = gScreenshotFrame;
     std::unique_ptr<TraceReplayInterface> mTraceReplay;
 };
 
@@ -838,6 +839,30 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
       mStartFrame(0),
       mEndFrame(0)
 {
+    bool isAMD      = IsAMD() && !mParams->isSwiftshader();
+    bool isAMDLinux = isAMD && IsLinux();
+    // bool isAMDLinuxANGLE  = isAMDLinux && mParams->isANGLE();
+    bool isAMDLinuxNative = isAMDLinux && !mParams->isANGLE();
+    bool isAMDWin         = isAMD && IsWindows();
+    bool isAMDWinANGLE    = isAMDWin && mParams->isANGLE();
+    // bool isAMDWinNative   = isAMDWin && !mParams->isANGLE();
+
+    bool isIntel            = IsIntel() && !mParams->isSwiftshader();
+    bool isIntelLinux       = isIntel && IsLinux();
+    bool isIntelLinuxANGLE  = isIntelLinux && mParams->isANGLE();
+    bool isIntelLinuxNative = isIntelLinux && !mParams->isANGLE();
+    bool isIntelWin         = IsWindows() && isIntel;
+    bool isIntelWinANGLE    = isIntelWin && mParams->isANGLE();
+    bool isIntelWinNative   = isIntelWin && !mParams->isANGLE();
+
+    bool isNVIDIA            = IsNVIDIA() && !mParams->isSwiftshader();
+    bool isNVIDIALinux       = isNVIDIA && IsLinux();
+    bool isNVIDIALinuxANGLE  = isNVIDIALinux && mParams->isANGLE();
+    bool isNVIDIALinuxNative = isNVIDIALinux && !mParams->isANGLE();
+    bool isNVIDIAWin         = isNVIDIA && IsWindows();
+    bool isNVIDIAWinANGLE    = isNVIDIAWin && mParams->isANGLE();
+    bool isNVIDIAWinNative   = isNVIDIAWin && !mParams->isANGLE();
+
     if (!mParams->traceInfo.initialized)
     {
         failTest("Failed to load trace json.");
@@ -849,14 +874,36 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
         addExtensionPrerequisite(extension);
     }
 
-    if (IsWindows() && IsIntel() && mParams->isVulkan() && traceNameIs("manhattan_10"))
+    if (!mParams->traceInfo.keyFrames.empty())
+    {
+        // Only support one keyFrame for now
+        if (mParams->traceInfo.keyFrames.size() != 1)
+        {
+            WARN() << "Multiple keyframes detected, only using the first";
+        }
+
+        // Only use keyFrame if the user didn't specify a value.
+        if (gScreenshotFrame == kDefaultScreenshotFrame)
+        {
+            mScreenshotFrame = mParams->traceInfo.keyFrames[0];
+            INFO() << "Trace contains keyframe, using frame " << mScreenshotFrame
+                   << " for screenshot";
+        }
+        else
+        {
+            WARN() << "Ignoring keyframe, user requested frame " << mScreenshotFrame
+                   << " for screenshot";
+        }
+    }
+
+    if (isIntelWinANGLE && traceNameIs("manhattan_10"))
     {
         skipTest(
             "TODO: http://anglebug.com/4533 This fails after the upgrade to the 26.20.100.7870 "
             "driver");
     }
 
-    if (IsWindows() && IsIntel() && !mParams->isANGLE() && traceNameIs("angry_birds_2_1500"))
+    if (isIntelWinNative && traceNameIs("angry_birds_2_1500"))
     {
         skipTest("TODO: http://anglebug.com/4731 Fails on older Intel drivers. Passes in newer");
     }
@@ -874,18 +921,18 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
         // TODO: http://anglebug.com/4731 This extension is missing on older Intel drivers.
         addExtensionPrerequisite("GL_OES_EGL_image_external");
 
-        if (IsWindows() && IsIntel())
+        if (isIntelWin)
         {
             skipTest("http://anglebug.com/6568 Flaky on Intel/windows");
         }
     }
 
-    if (IsWindows() && IsIntel() && mParams->isVulkan() && traceNameIs("black_desert_mobile"))
+    if (isIntelWinANGLE && traceNameIs("black_desert_mobile"))
     {
         skipTest("TODO: http://anglebug.com/7879 Non-deterministic image on 31.0.101.2111 driver");
     }
 
-    if (IsWindows() && IsIntel() && mParams->isVulkan() && traceNameIs("the_gardens_between"))
+    if (isIntelWinANGLE && traceNameIs("the_gardens_between"))
     {
         skipTest("TODO: http://anglebug.com/7879 Non-deterministic image on 31.0.101.2111 driver");
     }
@@ -930,7 +977,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
     {
         addExtensionPrerequisite("GL_EXT_shadow_samplers");
 
-        if (IsLinux() && IsIntel() && mParams->isVulkan())
+        if (isIntelLinuxANGLE)
         {
             skipTest(
                 "TODO: https://anglebug.com/5517 Linux+Intel generates 'Framebuffer is incomplete' "
@@ -952,7 +999,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
         // Intel doesn't support external images.
         addExtensionPrerequisite("GL_OES_EGL_image_external");
 
-        if (IsLinux() && (IsIntel() || IsAMD()) && mParams->driver != GLESDriverType::AngleEGL)
+        if (isIntelLinuxNative || isAMDLinuxNative)
         {
             skipTest("http://anglebug.com/5822 Failing on Linux Intel and AMD due to invalid enum");
         }
@@ -970,7 +1017,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("efootball_pes_2021"))
     {
-        if (mParams->isVulkan() && IsLinux() && IsIntel())
+        if (isIntelLinuxANGLE)
         {
             skipTest(
                 "TODO: https://anglebug.com/5517 Linux+Intel generate 'Framebuffer is "
@@ -991,7 +1038,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("happy_color"))
     {
-        if (IsWindows() && IsAMD() && mParams->isVulkan())
+        if (isAMDWinANGLE)
         {
             skipTest("http://anglebug.com/5623 Generates incorrect results on AMD Windows Vulkan");
         }
@@ -999,7 +1046,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("bus_simulator_indonesia"))
     {
-        if (IsLinux() && (IsIntel() || IsAMD()) && !mParams->isVulkan())
+        if (isIntelLinuxNative || isAMDLinuxNative)
         {
             skipTest("TODO: https://anglebug.com/5629 native GLES generates GL_INVALID_OPERATION");
         }
@@ -1007,7 +1054,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("messenger_lite"))
     {
-        if (IsWindows() && IsNVIDIA() && mParams->isVulkan() && !mParams->isSwiftshader())
+        if (isNVIDIAWinANGLE)
         {
             skipTest(
                 "https://anglebug.com/5663 Incorrect pixels on NVIDIA Windows for first frame");
@@ -1021,13 +1068,13 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("car_parking_multiplayer"))
     {
-        if (IsNVIDIA() && !mParams->isVulkan())
+        if (isNVIDIAWinNative || isNVIDIALinuxNative)
         {
             skipTest(
                 "TODO: https://anglebug.com/5613 NVIDIA native driver spews undefined behavior "
                 "warnings");
         }
-        if (IsWindows() && IsIntel() && mParams->isVulkan())
+        if (isIntelWinANGLE)
         {
             skipTest("https://anglebug.com/5724 Device lost on Win Intel");
         }
@@ -1035,7 +1082,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("fifa_mobile"))
     {
-        if (IsWindows() && IsIntel() && mParams->isVulkan())
+        if (isIntelWinANGLE)
         {
             skipTest(
                 "TODO: http://anglebug.com/5875 Intel Windows Vulkan flakily renders entirely "
@@ -1050,7 +1097,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("plants_vs_zombies_2"))
     {
-        if (IsWindows() && IsAMD() && mParams->isVulkan())
+        if (isAMDWinANGLE)
         {
             skipTest("TODO: http://crbug.com/1187752 Corrupted image");
         }
@@ -1072,7 +1119,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
         addExtensionPrerequisite("GL_OES_EGL_image_external");
         addExtensionPrerequisite("GL_KHR_texture_compression_astc_ldr");
 
-        if (IsLinux() && IsIntel() && mParams->isVulkan())
+        if (isIntelLinuxANGLE)
         {
             skipTest("TODO: http://anglebug.com/5815 Trace is crashing on Intel Linux");
         }
@@ -1087,7 +1134,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
     {
         addExtensionPrerequisite("GL_OES_EGL_image_external");
 
-        if ((IsLinux() && IsIntel()) && mParams->isVulkan())
+        if (isIntelLinuxANGLE)
         {
             skipTest(
                 "TODO: http://anglebug.com/5807 Intel Linux errors with 'Framebuffer is "
@@ -1096,10 +1143,10 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
     }
 
     if (traceNameIs("hill_climb_racing") || traceNameIs("dead_trigger_2") ||
-        traceNameIs("disney_mirrorverse"))
+        traceNameIs("disney_mirrorverse") || traceNameIs("cut_the_rope") ||
+        traceNameIs("geometry_dash"))
     {
-        if (IsAndroid() && (IsPixel4() || IsPixel4XL()) &&
-            mParams->driver == GLESDriverType::SystemEGL)
+        if (IsAndroid() && (IsPixel4() || IsPixel4XL()) && !mParams->isANGLE())
         {
             skipTest(
                 "http://anglebug.com/5823 Adreno gives a driver error with empty/small draw calls");
@@ -1113,7 +1160,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("professional_baseball_spirits"))
     {
-        if (IsLinux() && (IsAMD() || IsIntel()) && mParams->isVulkan() && !mParams->isSwiftshader())
+        if (isIntelLinuxANGLE || isAMDLinuxNative)
         {
             skipTest(
                 "TODO: https://anglebug.com/5827 Linux+Mesa/RADV Vulkan generates "
@@ -1124,7 +1171,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("call_break_offline_card_game"))
     {
-        if ((IsLinux() && IsIntel()) && mParams->isVulkan())
+        if (isIntelLinuxANGLE)
         {
             skipTest(
                 "TODO: http://anglebug.com/5837 Intel Linux Vulkan errors with 'Framebuffer is "
@@ -1139,7 +1186,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("summoners_war"))
     {
-        if (IsWindows() && IsIntel() && mParams->driver != GLESDriverType::AngleEGL)
+        if (isIntelWinANGLE)
         {
             skipTest("TODO: http://anglebug.com/5943 GL_INVALID_ENUM on Windows/Intel");
         }
@@ -1150,12 +1197,12 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
         addExtensionPrerequisite("GL_EXT_texture_cube_map_array");
         addExtensionPrerequisite("GL_KHR_texture_compression_astc_ldr");
 
-        if (IsLinux() && IsIntel() && mParams->isVulkan())
+        if (isIntelLinuxANGLE)
         {
             skipTest("TODO: http://anglebug.com/5989 Intel Linux crashing on teardown");
         }
 
-        if (IsWindows() && IsIntel() && mParams->isVulkan())
+        if (isIntelWinANGLE)
         {
             skipTest("TODO: http://anglebug.com/5994 Intel Windows timing out periodically");
         }
@@ -1171,12 +1218,12 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
     {
         addExtensionPrerequisite("GL_KHR_texture_compression_astc_ldr");
 
-        if (IsNVIDIA() && mParams->isVulkan())
+        if (isNVIDIAWinANGLE || isNVIDIALinuxANGLE)
         {
             skipTest("http://anglebug.com/7496 Nondeterministic noise between runs");
         }
 
-        if ((IsLinux() && IsIntel()) && mParams->isVulkan())
+        if (isIntelLinuxANGLE)
         {
             skipTest("TODO: http://anglebug.com/6029 Crashes on Linux Intel Vulkan");
         }
@@ -1189,7 +1236,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("mario_kart_tour"))
     {
-        if (IsLinux() && IsIntel() && !mParams->isVulkan())
+        if (isIntelLinuxNative)
         {
             skipTest("http://anglebug.com/6711 Fails on native Mesa");
         }
@@ -1199,7 +1246,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
     {
         addExtensionPrerequisite("GL_EXT_texture_buffer");
 
-        if (((IsWindows() && IsIntel()) || IsNVIDIA()) && !mParams->isVulkan())
+        if (isIntelWinNative || isNVIDIALinuxNative || isNVIDIAWinNative)
         {
             skipTest("TODO: http://anglebug.com/6240 Internal errors on Windows/Intel and NVIDIA");
         }
@@ -1207,7 +1254,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("sakura_school_simulator"))
     {
-        if (IsWindows() && IsIntel())
+        if (isIntelWin)
         {
             skipTest("http://anglebug.com/6294 Flaky on Intel");
         }
@@ -1221,7 +1268,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
     if (traceNameIs("world_of_kings"))
     {
         addExtensionPrerequisite("GL_OES_EGL_image_external");
-        if (IsWindows() && IsIntel())
+        if (isIntelWin)
         {
             skipTest("http://anglebug.com/6372 Flaky on Intel");
         }
@@ -1258,7 +1305,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
     {
         addExtensionPrerequisite("GL_KHR_texture_compression_astc_ldr");
 
-        if (IsLinux() && IsIntel() && !mParams->isVulkan())
+        if (isIntelLinuxNative)
         {
             skipTest("http://anglebug.com/6657 Native test timing out on Intel Linux");
         }
@@ -1266,8 +1313,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("zillow"))
     {
-        if ((IsLinux() || IsWindows()) && IsNVIDIA() &&
-            mParams->driver == GLESDriverType::AngleEGL && !mParams->isSwiftshader())
+        if (isNVIDIAWinANGLE || isNVIDIALinuxANGLE)
         {
             skipTest("http://anglebug.com/6658 Crashing in Vulkan backend");
         }
@@ -1285,7 +1331,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("pubg_mobile_launch"))
     {
-        if (IsLinux() && IsNVIDIA() && mParams->driver != GLESDriverType::AngleEGL)
+        if (isNVIDIALinuxNative)
         {
             skipTest("http://anglebug.com/6850 Crashing in Nvidia GLES driver");
         }
@@ -1317,7 +1363,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("marvel_strike_force"))
     {
-        if ((IsAndroid() && IsQualcomm()) && mParams->driver != GLESDriverType::AngleEGL)
+        if ((IsAndroid() && IsQualcomm()) && !mParams->isANGLE())
         {
             skipTest(
                 "http://anglebug.com/7017 Qualcomm native driver gets confused about the state of "
@@ -1344,17 +1390,17 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("car_chase"))
     {
-        if (IsWindows() && IsIntel())
+        if (isIntelWin)
         {
             skipTest("http://anglebug.com/7173 Fails on Intel HD 630 Mobile");
         }
 
-        if (IsLinux() && IsIntel())
+        if (isIntelLinux)
         {
             skipTest("http://anglebug.com/7125#c8 Flaky hang on UHD630 Mesa 20.0.8");
         }
 
-        if (IsNVIDIA() && mParams->isVulkan())
+        if (isNVIDIAWinANGLE || isNVIDIALinuxANGLE)
         {
             skipTest("http://anglebug.com/7125 Renders incorrectly on NVIDIA");
         }
@@ -1378,7 +1424,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("tessellation"))
     {
-        if (IsNVIDIA() && mParams->isVulkan())
+        if (isNVIDIAWinANGLE || isNVIDIALinuxANGLE)
         {
             skipTest("http://anglebug.com/7240 Tessellation driver bugs on Nvidia");
         }
@@ -1431,7 +1477,7 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("life_is_strange"))
     {
-        if (IsWindows() && IsNVIDIA() && mParams->isVulkan() && !mParams->isSwiftshader())
+        if (isNVIDIAWinANGLE)
         {
             skipTest("http://anglebug.com/7723 Renders incorrectly on Nvidia Windows");
         }
@@ -1442,12 +1488,12 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
 
     if (traceNameIs("survivor_io"))
     {
-        if (IsWindows() && IsNVIDIA() && mParams->isVulkan() && !mParams->isSwiftshader())
+        if (isNVIDIAWinANGLE)
         {
             skipTest("http://anglebug.com/7733 Renders incorrectly on Nvidia Windows");
         }
 
-        if (IsWindows() && IsIntel() && mParams->driver != GLESDriverType::AngleEGL)
+        if (isIntelWinNative)
         {
             skipTest(
                 "http://anglebug.com/7737 Programs fail to link on Intel Windows native driver, "
@@ -1464,6 +1510,88 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
     if (traceNameIs("diablo_immortal"))
     {
         addExtensionPrerequisite("GL_EXT_shader_framebuffer_fetch");
+    }
+
+    if (traceNameIs("mu_origin_3"))
+    {
+        addExtensionPrerequisite("GL_EXT_texture_buffer");
+        addExtensionPrerequisite("GL_EXT_shader_framebuffer_fetch");
+        addExtensionPrerequisite("GL_OES_EGL_image_external");
+    }
+
+    if (traceNameIs("catalyst_black"))
+    {
+        addExtensionPrerequisite("GL_EXT_shader_framebuffer_fetch");
+    }
+
+    if (traceNameIs("five_nights_at_freddys"))
+    {
+        if (isIntelWinANGLE)
+        {
+            skipTest("http://anglebug.com/7929 Too slow on Win Intel Vulkan");
+        }
+    }
+
+    if (traceNameIs("pubg_mobile_launch"))
+    {
+        if (isIntelWinNative)
+        {
+            skipTest("http://anglebug.com/7929 Too slow on Win Intel native");
+        }
+    }
+
+    if (traceNameIs("beach_buggy_racing"))
+    {
+        if (isIntelWinANGLE)
+        {
+            skipTest("http://anglebug.com/7934 Flaky context lost on Win Intel Vulkan");
+        }
+    }
+
+    if (traceNameIs("aliexpress"))
+    {
+        if (isIntelWinNative)
+        {
+            skipTest("http://anglebug.com/7934 Flaky failure on Win Intel native");
+        }
+    }
+
+    if (traceNameIs("final_fantasy"))
+    {
+        if (IsAndroid() && IsPixel6() && !mParams->isANGLE())
+        {
+            skipTest("http://anglebug.com/7936 Crashes on Pixel 6 native");
+        }
+    }
+
+    if (traceNameIs("limbo"))
+    {
+        addExtensionPrerequisite("GL_EXT_shader_framebuffer_fetch");
+
+        // For LUMINANCE8_ALPHA8_EXT
+        addExtensionPrerequisite("GL_EXT_texture_storage");
+    }
+
+    if (traceNameIs("into_the_dead_2"))
+    {
+        if (isNVIDIAWinANGLE)
+        {
+            skipTest("http://anglebug.com/8042 Non-deterministic trace");
+        }
+    }
+
+    if (traceNameIs("arknights"))
+    {
+        // Intel doesn't support external images.
+        addExtensionPrerequisite("GL_OES_EGL_image_external");
+    }
+
+    if (traceNameIs("street_fighter_duel"))
+    {
+        if (isNVIDIAWinANGLE)
+        {
+            skipTest("https://anglebug.com/8074 NVIDIA Windows flaky diffs");
+        }
     }
 
     // glDebugMessageControlKHR and glDebugMessageCallbackKHR crash on ARM GLES1.
@@ -1485,6 +1613,22 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
     if (gWarmupSteps == kAllFrames)
     {
         mWarmupSteps = frameCount();
+    }
+
+    if (gRunToKeyFrame)
+    {
+        if (mParams->traceInfo.keyFrames.empty())
+        {
+            // If we don't have a keyFrame, run one step
+            INFO() << "No keyframe available for trace, running to frame 1";
+            mStepsToRun = 1;
+        }
+        else
+        {
+            int keyFrame = mParams->traceInfo.keyFrames[0];
+            INFO() << "Running to keyframe: " << keyFrame;
+            mStepsToRun = keyFrame;
+        }
     }
 }
 
@@ -2218,16 +2362,16 @@ void TracePerfTest::swap()
 {
     // Capture a screenshot if enabled.
     if (gScreenshotDir != nullptr && gSaveScreenshots && !mScreenshotSaved &&
-        static_cast<uint32_t>(gScreenshotFrame) == mCurrentIteration)
+        mScreenshotFrame == mCurrentIteration)
     {
         std::stringstream screenshotNameStr;
         screenshotNameStr << gScreenshotDir << GetPathSeparator() << "angle" << mBackend << "_"
                           << mStory;
 
         // Add a marker to the name for any screenshot that isn't start frame
-        if (mStartFrame != static_cast<uint32_t>(gScreenshotFrame))
+        if (mStartFrame != mScreenshotFrame)
         {
-            screenshotNameStr << "_frame" << gScreenshotFrame;
+            screenshotNameStr << "_frame" << mScreenshotFrame;
         }
 
         screenshotNameStr << ".png";
