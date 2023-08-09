@@ -299,14 +299,15 @@ void ProgramVk::initDefaultUniformLayoutMapping(gl::ShaderMap<sh::BlockLayoutMap
         {
             const auto &uniform = uniforms[location.index];
             if (uniform.isInDefaultBlock() && !uniform.isSampler() && !uniform.isImage() &&
-                !uniform.isFragmentInOut)
+                !uniform.isFragmentInOut())
             {
-                std::string uniformName = uniform.name;
+                std::string uniformName = glExecutable.getUniformNameByIndex(location.index);
                 if (uniform.isArray())
                 {
                     // Gets the uniform name without the [0] at the end.
                     uniformName = gl::StripLastArrayIndex(uniformName);
-                    ASSERT(uniformName.size() != uniform.name.size());
+                    ASSERT(uniformName.size() !=
+                           glExecutable.getUniformNameByIndex(location.index).size());
                 }
 
                 bool found = false;
@@ -339,6 +340,15 @@ GLboolean ProgramVk::validate(const gl::Caps &caps, gl::InfoLog *infoLog)
     return GL_TRUE;
 }
 
+angle::Result ProgramVk::syncState(const gl::Context *context,
+                                   const gl::Program::DirtyBits &dirtyBits)
+{
+    ASSERT(dirtyBits.any());
+    // Push dirty bits to executable so that they can be used later.
+    mExecutable.mDirtyBits |= dirtyBits;
+    return angle::Result::Continue;
+}
+
 template <typename T>
 void ProgramVk::setUniformImpl(GLint location, GLsizei count, const T *v, GLenum entryPointType)
 {
@@ -348,7 +358,7 @@ void ProgramVk::setUniformImpl(GLint location, GLsizei count, const T *v, GLenum
 
     ASSERT(!linkedUniform.isSampler());
 
-    if (linkedUniform.typeInfo->type == entryPointType)
+    if (linkedUniform.type == entryPointType)
     {
         for (const gl::ShaderType shaderType : glExecutable.getLinkedShaderStages())
         {
@@ -361,7 +371,7 @@ void ProgramVk::setUniformImpl(GLint location, GLsizei count, const T *v, GLenum
                 continue;
             }
 
-            const GLint componentCount = linkedUniform.typeInfo->componentCount;
+            const GLint componentCount = linkedUniform.getElementComponents();
             UpdateDefaultUniformBlock(count, locationInfo.arrayIndex, componentCount, v, layoutInfo,
                                       &uniformBlock.uniformData);
             mExecutable.mDefaultUniformBlocksDirty.set(shaderType);
@@ -380,9 +390,9 @@ void ProgramVk::setUniformImpl(GLint location, GLsizei count, const T *v, GLenum
                 continue;
             }
 
-            const GLint componentCount = linkedUniform.typeInfo->componentCount;
+            const GLint componentCount = linkedUniform.getElementComponents();
 
-            ASSERT(linkedUniform.typeInfo->type == gl::VariableBoolVectorType(entryPointType));
+            ASSERT(linkedUniform.type == gl::VariableBoolVectorType(entryPointType));
 
             GLint initialArrayOffset =
                 locationInfo.arrayIndex * layoutInfo.arrayStride + layoutInfo.offset;
@@ -412,24 +422,26 @@ void ProgramVk::getUniformImpl(GLint location, T *v, GLenum entryPointType) cons
 
     ASSERT(!linkedUniform.isSampler() && !linkedUniform.isImage());
 
-    const gl::ShaderType shaderType = linkedUniform.getFirstShaderTypeWhereActive();
+    const gl::ShaderType shaderType = linkedUniform.getFirstActiveShaderType();
     ASSERT(shaderType != gl::ShaderType::InvalidEnum);
 
     const DefaultUniformBlock &uniformBlock = *mExecutable.mDefaultUniformBlocks[shaderType];
     const sh::BlockMemberInfo &layoutInfo   = uniformBlock.uniformLayout[location];
 
-    ASSERT(linkedUniform.typeInfo->componentType == entryPointType ||
-           linkedUniform.typeInfo->componentType == gl::VariableBoolVectorType(entryPointType));
+    ASSERT(gl::GetUniformTypeInfo(linkedUniform.type).componentType == entryPointType ||
+           gl::GetUniformTypeInfo(linkedUniform.type).componentType ==
+               gl::VariableBoolVectorType(entryPointType));
 
-    if (gl::IsMatrixType(linkedUniform.type))
+    if (gl::IsMatrixType(linkedUniform.getType()))
     {
         const uint8_t *ptrToElement = uniformBlock.uniformData.data() + layoutInfo.offset +
                                       (locationInfo.arrayIndex * layoutInfo.arrayStride);
-        GetMatrixUniform(linkedUniform.type, v, reinterpret_cast<const T *>(ptrToElement), false);
+        GetMatrixUniform(linkedUniform.getType(), v, reinterpret_cast<const T *>(ptrToElement),
+                         false);
     }
     else
     {
-        ReadFromDefaultUniformBlock(linkedUniform.typeInfo->componentCount, locationInfo.arrayIndex,
+        ReadFromDefaultUniformBlock(linkedUniform.getElementComponents(), locationInfo.arrayIndex,
                                     v, layoutInfo, &uniformBlock.uniformData);
     }
 }
@@ -525,8 +537,8 @@ void ProgramVk::setUniformMatrixfv(GLint location,
         }
 
         SetFloatUniformMatrixGLSL<cols, rows>::Run(
-            locationInfo.arrayIndex, linkedUniform.getArraySizeProduct(), count, transpose, value,
-            uniformBlock.uniformData.data() + layoutInfo.offset);
+            locationInfo.arrayIndex, linkedUniform.getBasicTypeElementCount(), count, transpose,
+            value, uniformBlock.uniformData.data() + layoutInfo.offset);
 
         mExecutable.mDefaultUniformBlocksDirty.set(shaderType);
     }

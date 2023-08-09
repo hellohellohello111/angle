@@ -24,8 +24,8 @@
 #include "libANGLE/renderer/gl/ShaderGL.h"
 #include "libANGLE/renderer/gl/StateManagerGL.h"
 #include "libANGLE/trace.h"
-#include "platform/FeaturesGL_autogen.h"
 #include "platform/PlatformMethods.h"
+#include "platform/autogen/FeaturesGL_autogen.h"
 
 namespace rx
 {
@@ -1015,17 +1015,18 @@ void ProgramGL::postLink()
 
         // From the GLES 3.0.5 spec:
         // "Locations for sequential array indices are not required to be sequential."
-        const gl::LinkedUniform &uniform = uniforms[entry.index];
+        const gl::LinkedUniform &uniform     = uniforms[entry.index];
+        const std::string &uniformMappedName = mState.getUniformMappedNames()[entry.index];
         std::stringstream fullNameStr;
         if (uniform.isArray())
         {
-            ASSERT(angle::EndsWith(uniform.mappedName, "[0]"));
-            fullNameStr << uniform.mappedName.substr(0, uniform.mappedName.length() - 3);
+            ASSERT(angle::EndsWith(uniformMappedName, "[0]"));
+            fullNameStr << uniformMappedName.substr(0, uniformMappedName.length() - 3);
             fullNameStr << "[" << entry.arrayIndex << "]";
         }
         else
         {
-            fullNameStr << uniform.mappedName;
+            fullNameStr << uniformMappedName;
         }
         const std::string &fullName = fullNameStr.str();
 
@@ -1057,15 +1058,6 @@ void ProgramGL::updateEnabledClipDistances(uint8_t enabledClipDistancesPacked) c
     ASSERT(mFunctions->programUniform1ui != nullptr);
     mFunctions->programUniform1ui(mProgramID, mClipDistanceEnabledUniformLocation,
                                   enabledClipDistancesPacked);
-}
-
-void ProgramGL::enableSideBySideRenderingPath() const
-{
-    ASSERT(mState.usesMultiview());
-    ASSERT(mMultiviewBaseViewLayerIndexUniformLocation != -1);
-
-    ASSERT(mFunctions->programUniform1i != nullptr);
-    mFunctions->programUniform1i(mProgramID, mMultiviewBaseViewLayerIndexUniformLocation, -1);
 }
 
 void ProgramGL::enableLayeredRenderingPath(int baseViewIndex) const

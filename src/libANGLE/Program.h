@@ -178,7 +178,8 @@ class ProgramBindings final : angle::NonCopyable
 
     void bindLocation(GLuint index, const std::string &name);
     int getBindingByName(const std::string &name) const;
-    int getBinding(const sh::ShaderVariable &variable) const;
+    template <typename T>
+    int getBinding(const T &variable) const;
 
     using const_iterator = angle::HashMap<std::string, GLuint>::const_iterator;
     const_iterator begin() const;
@@ -200,7 +201,8 @@ class ProgramAliasedBindings final : angle::NonCopyable
     void bindLocation(GLuint index, const std::string &name);
     int getBindingByName(const std::string &name) const;
     int getBindingByLocation(GLuint location) const;
-    int getBinding(const sh::ShaderVariable &variable) const;
+    template <typename T>
+    int getBinding(const T &variable) const;
 
     using const_iterator = angle::HashMap<std::string, ProgramBinding>::const_iterator;
     const_iterator begin() const;
@@ -259,6 +261,14 @@ class ProgramState final : angle::NonCopyable
         return mExecutable->getSecondaryOutputLocations();
     }
     const std::vector<LinkedUniform> &getUniforms() const { return mExecutable->getUniforms(); }
+    const std::vector<std::string> &getUniformNames() const
+    {
+        return mExecutable->getUniformNames();
+    }
+    const std::vector<std::string> &getUniformMappedNames() const
+    {
+        return mExecutable->getUniformMappedNames();
+    }
     const std::vector<VariableLocation> &getUniformLocations() const { return mUniformLocations; }
     const std::vector<InterfaceBlock> &getUniformBlocks() const
     {
@@ -386,7 +396,7 @@ class ProgramState final : angle::NonCopyable
     bool mSeparable;
     rx::SpecConstUsageBits mSpecConstUsageBits;
 
-    // ANGLE_multiview.
+    // GL_OVR_multiview / GL_OVR_multiview2
     int mNumViews;
 
     // GL_ANGLE_multi_draw
@@ -529,6 +539,14 @@ class Program final : public LabeledObject, public angle::Subject
     {
         ASSERT(!mLinkingState);
         return mState.mExecutable->getUniformByIndex(index);
+    }
+    const std::string &getUniformNameByIndex(GLuint index) const
+    {
+        return mState.getUniformNames()[index];
+    }
+    const std::string &getUniformMappedNameByIndex(GLuint index) const
+    {
+        return mState.getUniformMappedNames()[index];
     }
 
     const BufferVariable &getBufferVariableByIndex(GLuint index) const;
@@ -752,6 +770,9 @@ class Program final : public LabeledObject, public angle::Subject
 
         DIRTY_BIT_COUNT = DIRTY_BIT_UNIFORM_BLOCK_BINDING_MAX,
     };
+    static_assert(DIRTY_BIT_UNIFORM_BLOCK_BINDING_0 == 0,
+                  "UniformBlockBindingMask must match DirtyBits because UniformBlockBindingMask is "
+                  "used directly to set dirty bits.");
 
     using DirtyBits = angle::BitSet<DIRTY_BIT_COUNT>;
 
@@ -776,9 +797,19 @@ class Program final : public LabeledObject, public angle::Subject
     const ProgramExecutable &getExecutable() const { return mState.getExecutable(); }
     ProgramExecutable &getExecutable() { return mState.getExecutable(); }
 
-  private:
-    struct LinkingState;
+    void onUniformBufferStateChange(size_t uniformBufferIndex)
+    {
+        if (uniformBufferIndex >= mUniformBlockBindingMasks.size())
+        {
+            mUniformBlockBindingMasks.resize(uniformBufferIndex + 1, UniformBlockBindingMask());
+        }
+        mDirtyBits |= mUniformBlockBindingMasks[uniformBufferIndex];
+    }
 
+  private:
+    friend class ProgramPipeline;
+
+    struct LinkingState;
     ~Program() override;
 
     // Loads program state according to the specified binary blob.
@@ -885,6 +916,16 @@ class Program final : public LabeledObject, public angle::Subject
     const ShaderProgramID mHandle;
 
     DirtyBits mDirtyBits;
+
+    // To simplify dirty bits handling, instead of tracking dirtiness of both uniform block index
+    // and uniform binding index, we only track which uniform block index is dirty. And then when
+    // buffer index is dirty, we look at which uniform blocks are bound to this buffer binding index
+    // and set all of these uniform blocks dirty. This variable tracks all the uniform blocks bound
+    // to the given binding index in the form of bitmask so that we can quickly convert them to the
+    // dirty bits.
+    static constexpr size_t kFastUniformBlockBindingLimit = 8;
+    angle::FastVector<UniformBlockBindingMask, kFastUniformBlockBindingLimit>
+        mUniformBlockBindingMasks;
 
     std::mutex mHistogramMutex;
 };

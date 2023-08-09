@@ -128,6 +128,12 @@ namespace
         }                                                  \
     }
 
+enum class BufferUpdate
+{
+    SubData,  // use glBufferSubData
+    Copy,     // use glCopyBufferSubData
+};
+
 class VulkanPerformanceCounterTest : public ANGLETest<>
 {
   protected:
@@ -315,6 +321,35 @@ class VulkanPerformanceCounterTest : public ANGLETest<>
 
     void saveAndReloadBinary(GLProgram *original, GLProgram *reloaded);
     void testPipelineCacheIsWarm(GLProgram *program, GLColor color);
+
+    void updateBuffer(BufferUpdate update,
+                      GLenum target,
+                      GLintptr offset,
+                      GLsizeiptr size,
+                      const void *data)
+    {
+        if (update == BufferUpdate::SubData)
+        {
+            // If using glBufferSubData, directly upload data on the specified target (where the
+            // buffer is already bound)
+            glBufferSubData(target, offset, size, data);
+        }
+        else
+        {
+            // Otherwise copy through a temp buffer.  Use a non-zero offset for more coverage.
+            constexpr GLintptr kStagingOffset = 123;
+            GLBuffer staging;
+            glBindBuffer(GL_COPY_READ_BUFFER, staging);
+            glBufferData(GL_COPY_READ_BUFFER, offset + size + kStagingOffset * 2, nullptr,
+                         GL_STATIC_DRAW);
+            glBufferSubData(GL_COPY_READ_BUFFER, kStagingOffset, size, data);
+            glCopyBufferSubData(GL_COPY_READ_BUFFER, target, kStagingOffset, offset, size);
+        }
+    }
+
+    void mappingGpuReadOnlyBufferGhostsBuffer(BufferUpdate update);
+    void partialBufferUpdateShouldNotBreakRenderPass(BufferUpdate update);
+    void bufferSubDataShouldNotTriggerSyncState(BufferUpdate update);
 
     angle::VulkanPerfCounters getPerfCounters()
     {
@@ -1499,6 +1534,157 @@ TEST_P(VulkanPerformanceCounterTest, ReadOnlyDepthStencilFeedbackLoopUsesSingleR
     glDepthMask(GL_FALSE);
     glEnable(GL_DEPTH_TEST);
     glBindTexture(GL_TEXTURE_2D, depthTexture);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_GL_NO_ERROR();
+
+    uint64_t actualRenderPassCount = getPerfCounters().renderPasses;
+    EXPECT_EQ(expectedRenderPassCount, actualRenderPassCount);
+
+    // Do a final write to depth to make sure we can switch out of read-only mode.
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDepthMask(GL_TRUE);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_GL_NO_ERROR();
+}
+
+// Ensures clear color buffer and read-only depth-stencil works in a single RenderPass (as seen in
+// gfxbench manhattan).
+TEST_P(VulkanPerformanceCounterTest, ClearColorBufferAndReadOnlyDepthStencilUsesSingleRenderPass)
+{
+    ANGLE_SKIP_TEST_IF(!IsGLExtensionEnabled(kPerfMonitorExtensionName));
+
+    constexpr GLsizei kSize = 4;
+
+    ANGLE_GL_PROGRAM(redProgram, essl1_shaders::vs::Simple(), essl1_shaders::fs::Red());
+    ANGLE_GL_PROGRAM(texProgram, essl1_shaders::vs::Texture2D(), essl1_shaders::fs::Texture2D());
+
+    setupQuadVertexBuffer(0.5f, 1.0f);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+
+    // Set up a depth texture and draw a quad to initialize it with known value.
+    GLTexture depthTexture;
+    glBindTexture(GL_TEXTURE_2D, depthTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, kSize, kSize, 0, GL_DEPTH_COMPONENT,
+                 GL_UNSIGNED_INT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    GLFramebuffer depthOnlyFBO;
+    glBindFramebuffer(GL_FRAMEBUFFER, depthOnlyFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glUseProgram(redProgram);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_GL_NO_ERROR();
+
+    // Setup a color texture and FBO with color and read only depth attachment.
+    GLTexture colorTexture;
+    glBindTexture(GL_TEXTURE_2D, colorTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kSize, kSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    GLFramebuffer depthAndColorFBO;
+    glBindFramebuffer(GL_FRAMEBUFFER, depthAndColorFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
+    uint64_t expectedRenderPassCount = getPerfCounters().renderPasses + 1;
+    // First clear color buffer. This should not cause this render pass to switch to read only depth
+    // stencil mode
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    // Now set up the read-only feedback loop.
+    glDepthMask(GL_FALSE);
+    glEnable(GL_DEPTH_TEST);
+    glBindTexture(GL_TEXTURE_2D, depthTexture);
+    glUseProgram(texProgram);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_GL_NO_ERROR();
+
+    // Render with just the depth attachment.
+    glUseProgram(redProgram);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_GL_NO_ERROR();
+
+    // Rebind the depth texture.
+    glUseProgram(texProgram);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_DEPTH_TEST);
+    glBindTexture(GL_TEXTURE_2D, depthTexture);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_GL_NO_ERROR();
+
+    uint64_t actualRenderPassCount = getPerfCounters().renderPasses;
+    EXPECT_EQ(expectedRenderPassCount, actualRenderPassCount);
+
+    // Do a final write to depth to make sure we can switch out of read-only mode.
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDepthMask(GL_TRUE);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_GL_NO_ERROR();
+}
+
+// Ensures an actual depth feedback loop (i.e, render and sample from same texture which is
+// undefined behavior according to spec) works in a single RenderPass. This is adoptted from usage
+// pattern from gangstar_vegas.
+TEST_P(VulkanPerformanceCounterTest, DepthFeedbackLoopUsesSingleRenderPass)
+{
+    ANGLE_SKIP_TEST_IF(!IsGLExtensionEnabled(kPerfMonitorExtensionName));
+
+    constexpr GLsizei kSize = 4;
+
+    ANGLE_GL_PROGRAM(redProgram, essl1_shaders::vs::Simple(), essl1_shaders::fs::Red());
+    ANGLE_GL_PROGRAM(texProgram, essl1_shaders::vs::Texture2D(), essl1_shaders::fs::Texture2D());
+
+    GLTexture colorTexture;
+    glBindTexture(GL_TEXTURE_2D, colorTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kSize, kSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    setupQuadVertexBuffer(0.5f, 1.0f);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+
+    // Set up a depth texture and fill it with an arbitrary initial value.
+    GLTexture depthTexture;
+    glBindTexture(GL_TEXTURE_2D, depthTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, kSize, kSize, 0, GL_DEPTH_COMPONENT,
+                 GL_UNSIGNED_INT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    GLFramebuffer depthAndColorFBO;
+    glBindFramebuffer(GL_FRAMEBUFFER, depthAndColorFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
+
+    GLFramebuffer depthOnlyFBO;
+    glBindFramebuffer(GL_FRAMEBUFFER, depthOnlyFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
+
+    // Draw to a first FBO to initialize the depth buffer.
+    glBindFramebuffer(GL_FRAMEBUFFER, depthOnlyFBO);
+    glEnable(GL_DEPTH_TEST);
+    glUseProgram(redProgram);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_GL_NO_ERROR();
+
+    uint64_t expectedRenderPassCount = getPerfCounters().renderPasses + 1;
+
+    // Start new RenderPass with depth write enabled and form the actual feedback loop.
+    glBindFramebuffer(GL_FRAMEBUFFER, depthAndColorFBO);
+    glDepthMask(true);
+    glUseProgram(texProgram);
+    glBindTexture(GL_TEXTURE_2D, depthTexture);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ASSERT_GL_NO_ERROR();
+
+    // Now set up the read-only feedback loop.
+    glDepthMask(false);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     ASSERT_GL_NO_ERROR();
 
@@ -4910,7 +5096,7 @@ void main()
 
 // Test that mapping a buffer that the GPU is using as read-only ghosts the buffer, rather than
 // waiting for the GPU access to complete before returning a pointer to the buffer.
-TEST_P(VulkanPerformanceCounterTest, MappingGpuReadOnlyBufferGhostsBuffer)
+void VulkanPerformanceCounterTest::mappingGpuReadOnlyBufferGhostsBuffer(BufferUpdate update)
 {
     ANGLE_SKIP_TEST_IF(!IsGLExtensionEnabled(kPerfMonitorExtensionName));
 
@@ -4919,7 +5105,7 @@ TEST_P(VulkanPerformanceCounterTest, MappingGpuReadOnlyBufferGhostsBuffer)
     // 3. Map the same buffer and fill with white
     //    - This should ghost the buffer, rather than ending the render pass.
     // 4. Draw with buffer
-    // 5. Update the buffer with glBufferSubData()
+    // 5. Update the buffer with glBufferSubData() or glCopyBufferSubData
     // 6. Draw with the buffer
     // The render pass should only be broken (counters.renderPasses == 0) due to the glReadPixels()
     // to verify the draw at the end.
@@ -4990,8 +5176,8 @@ void main()
     ASSERT_GL_NO_ERROR();
     ASSERT_EQ(getPerfCounters().renderPasses, 1u);
 
-    // Update the buffer with glBufferSubData
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(kUpdateData2), kUpdateData2.data());
+    // Update the buffer
+    updateBuffer(update, GL_UNIFORM_BUFFER, 0, sizeof(kUpdateData2), kUpdateData2.data());
     ASSERT_GL_NO_ERROR();
     ASSERT_EQ(getPerfCounters().renderPasses, 1u);
 
@@ -5006,9 +5192,22 @@ void main()
     EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::cyan);
 }
 
-// Verifies that BufferSubData calls don't cause a render pass break when it only uses the buffer
-// read-only.
-TEST_P(VulkanPerformanceCounterTest, BufferSubDataShouldNotBreakRenderPass)
+// Test that mapping a buffer that the GPU is using as read-only ghosts the buffer, rather than
+// waiting for the GPU access to complete before returning a pointer to the buffer.  This test uses
+// glBufferSubData to update the buffer.
+TEST_P(VulkanPerformanceCounterTest, MappingGpuReadOnlyBufferGhostsBuffer_SubData)
+{
+    mappingGpuReadOnlyBufferGhostsBuffer(BufferUpdate::SubData);
+}
+
+// Same as MappingGpuReadOnlyBufferGhostsBuffer_SubData, but using glCopyBufferSubData to update the
+// buffer.
+TEST_P(VulkanPerformanceCounterTest, MappingGpuReadOnlyBufferGhostsBuffer_Copy)
+{
+    mappingGpuReadOnlyBufferGhostsBuffer(BufferUpdate::Copy);
+}
+
+void VulkanPerformanceCounterTest::partialBufferUpdateShouldNotBreakRenderPass(BufferUpdate update)
 {
     ANGLE_SKIP_TEST_IF(!IsGLExtensionEnabled(kPerfMonitorExtensionName));
 
@@ -5081,7 +5280,7 @@ void main()
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     // Upload a small part of the buffer, and draw again.
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(kUpdateData1), kUpdateData1.data());
+    updateBuffer(update, GL_UNIFORM_BUFFER, 0, sizeof(kUpdateData1), kUpdateData1.data());
 
     glUniform4ui(expectLoc, kUpdateData1[0].asUint(), kInitialData[1].asUint(),
                  kInitialData[2].asUint(), kInitialData[3].asUint());
@@ -5089,8 +5288,8 @@ void main()
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     // Upload a large part of the buffer, and draw again.
-    glBufferSubData(GL_UNIFORM_BUFFER, sizeof(kUpdateData1), sizeof(kUpdateData2),
-                    kUpdateData2.data());
+    updateBuffer(update, GL_UNIFORM_BUFFER, sizeof(kUpdateData1), sizeof(kUpdateData2),
+                 kUpdateData2.data());
 
     glUniform4ui(expectLoc, kUpdateData1[0].asUint(), kUpdateData2[0].asUint(),
                  kUpdateData2[1].asUint(), kUpdateData2[2].asUint());
@@ -5105,8 +5304,21 @@ void main()
     EXPECT_EQ(getPerfCounters().renderPasses, expectedRenderPassCount);
 }
 
-// Verifies that BufferSubData calls don't trigger state updates for non-translated formats.
-TEST_P(VulkanPerformanceCounterTest, BufferSubDataShouldNotTriggerSyncState)
+// Verifies that BufferSubData calls don't cause a render pass break when it only uses the buffer
+// read-only.  This test uses glBufferSubData to update the buffer.
+TEST_P(VulkanPerformanceCounterTest, PartialBufferUpdateShouldNotBreakRenderPass_SubData)
+{
+    partialBufferUpdateShouldNotBreakRenderPass(BufferUpdate::SubData);
+}
+
+// Same as PartialBufferUpdateShouldNotBreakRenderPass_SubData, but using glCopyBufferSubData to
+// update the buffer.
+TEST_P(VulkanPerformanceCounterTest, PartialBufferUpdateShouldNotBreakRenderPass_Copy)
+{
+    partialBufferUpdateShouldNotBreakRenderPass(BufferUpdate::Copy);
+}
+
+void VulkanPerformanceCounterTest::bufferSubDataShouldNotTriggerSyncState(BufferUpdate update)
 {
     ANGLE_SKIP_TEST_IF(!IsGLExtensionEnabled(kPerfMonitorExtensionName));
 
@@ -5129,7 +5341,7 @@ TEST_P(VulkanPerformanceCounterTest, BufferSubDataShouldNotTriggerSyncState)
     const std::array<Vector3, 6> &quadVertices = GetQuadVertices();
     size_t bufferSize                          = sizeof(quadVertices[0]) * quadVertices.size();
 
-    glBufferSubData(GL_ARRAY_BUFFER, 0, bufferSize, quadVertices.data());
+    updateBuffer(update, GL_ARRAY_BUFFER, 0, bufferSize, quadVertices.data());
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
     ASSERT_GL_NO_ERROR();
@@ -5145,6 +5357,20 @@ TEST_P(VulkanPerformanceCounterTest, BufferSubDataShouldNotTriggerSyncState)
     EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::green);
 
     EXPECT_EQ(getPerfCounters().vertexArraySyncStateCalls, 1u);
+}
+
+// Verifies that BufferSubData calls don't trigger state updates for non-translated formats.  This
+// test uses glBufferSubData to update the buffer.
+TEST_P(VulkanPerformanceCounterTest, BufferSubDataShouldNotTriggerSyncState_SubData)
+{
+    bufferSubDataShouldNotTriggerSyncState(BufferUpdate::SubData);
+}
+
+// Same as BufferSubDataShouldNotTriggerSyncState_SubData, but using glCopyBufferSubData to update
+// the buffer.
+TEST_P(VulkanPerformanceCounterTest, BufferSubDataShouldNotTriggerSyncState_Copy)
+{
+    bufferSubDataShouldNotTriggerSyncState(BufferUpdate::Copy);
 }
 
 // Verifies that rendering to backbuffer discards depth/stencil.
@@ -6257,7 +6483,7 @@ TEST_P(VulkanPerformanceCounterTest, InvalidateThenRepeatedClearThenReadbackThen
 }
 
 // Tests that the submission counters count the implicit submission in eglSwapBuffers().
-TEST_P(VulkanPerformanceCounterTest, VerifySubmitCounters)
+TEST_P(VulkanPerformanceCounterTest, VerifySubmitCountersForSwapBuffer)
 {
     uint64_t expectedVkQueueSubmitCount      = getPerfCounters().vkQueueSubmitCallsTotal;
     uint64_t expectedCommandQueueSubmitCount = getPerfCounters().commandQueueSubmitCallsTotal;
@@ -6283,6 +6509,89 @@ TEST_P(VulkanPerformanceCounterTest, VerifySubmitCounters)
 
     EXPECT_EQ(getPerfCounters().vkQueueSubmitCallsTotal, expectedVkQueueSubmitCount);
     EXPECT_EQ(getPerfCounters().commandQueueSubmitCallsTotal, expectedCommandQueueSubmitCount);
+}
+
+// Tests that PreferSubmitAtFBOBoundary feature works properly. Bind to different FBO and should
+// trigger submit of previous FBO. In this specific test, we switch to system default framebuffer
+// which is always considered as "dirty".
+TEST_P(VulkanPerformanceCounterTest, VerifySubmitCounterForSwitchUserFBOToSystemFramebuffer)
+{
+    ANGLE_SKIP_TEST_IF(!IsGLExtensionEnabled(kPerfMonitorExtensionName));
+
+    uint64_t expectedCommandQueueSubmitCount = getPerfCounters().commandQueueSubmitCallsTotal;
+    uint64_t expectedCommandQueueWaitSemaphoreCount =
+        getPerfCounters().commandQueueWaitSemaphoresTotal;
+
+    GLFramebuffer framebuffer;
+    GLTexture texture;
+    setupForColorOpsTest(&framebuffer, &texture);
+
+    // Draw
+    ANGLE_GL_PROGRAM(program, essl1_shaders::vs::Simple(), essl1_shaders::fs::Red());
+    drawQuad(program, essl1_shaders::PositionAttrib(), 0.5f);
+    ASSERT_GL_NO_ERROR();
+
+    // One submission coming from glBindFramebuffer and draw
+    ++expectedCommandQueueSubmitCount;
+    // This submission should not wait for any semaphore.
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    drawQuad(program, essl1_shaders::PositionAttrib(), 0.5f);
+    ASSERT_GL_NO_ERROR();
+
+    EXPECT_EQ(getPerfCounters().commandQueueSubmitCallsTotal, expectedCommandQueueSubmitCount);
+    EXPECT_EQ(getPerfCounters().commandQueueWaitSemaphoresTotal,
+              expectedCommandQueueWaitSemaphoreCount);
+
+    // This submission must wait for ANI's semaphore
+    ++expectedCommandQueueWaitSemaphoreCount;
+    ++expectedCommandQueueSubmitCount;
+    swapBuffers();
+    EXPECT_EQ(getPerfCounters().commandQueueSubmitCallsTotal, expectedCommandQueueSubmitCount);
+    EXPECT_EQ(getPerfCounters().commandQueueWaitSemaphoresTotal,
+              expectedCommandQueueWaitSemaphoreCount);
+}
+
+// Tests that PreferSubmitAtFBOBoundary feature works properly. Bind to different FBO and should
+// trigger submit of previous FBO. In this specific test, we test bind to a new user FBO which we
+// used to had a bug.
+TEST_P(VulkanPerformanceCounterTest, VerifySubmitCounterForSwitchUserFBOToDirtyUserFBO)
+{
+    ANGLE_SKIP_TEST_IF(!IsGLExtensionEnabled(kPerfMonitorExtensionName));
+
+    uint64_t expectedCommandQueueSubmitCount = getPerfCounters().commandQueueSubmitCallsTotal;
+    uint64_t expectedCommandQueueWaitSemaphoreCount =
+        getPerfCounters().commandQueueWaitSemaphoresTotal;
+
+    GLFramebuffer framebuffer;
+    GLTexture texture;
+    setupForColorOpsTest(&framebuffer, &texture);
+
+    // Draw
+    ANGLE_GL_PROGRAM(program, essl1_shaders::vs::Simple(), essl1_shaders::fs::Red());
+    drawQuad(program, essl1_shaders::PositionAttrib(), 0.5f);
+    ASSERT_GL_NO_ERROR();
+
+    if (hasPreferSubmitAtFBOBoundary())
+    {
+        // One submission coming from glBindFramebuffer and draw
+        ++expectedCommandQueueSubmitCount;
+        // This submission should not wait for any semaphore.
+    }
+
+    // Create and bind to a new FBO
+    GLFramebuffer framebuffer2;
+    GLTexture texture2;
+    setupForColorOpsTest(&framebuffer2, &texture2);
+    drawQuad(program, essl1_shaders::PositionAttrib(), 0.5f);
+    ASSERT_GL_NO_ERROR();
+    ++expectedCommandQueueSubmitCount;
+    // This submission should not wait for ANI's semaphore
+    EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::red);
+
+    EXPECT_EQ(getPerfCounters().commandQueueSubmitCallsTotal, expectedCommandQueueSubmitCount);
+    EXPECT_EQ(getPerfCounters().commandQueueWaitSemaphoresTotal,
+              expectedCommandQueueWaitSemaphoreCount);
 }
 
 // Ensure that glFlush doesn't lead to vkQueueSubmit if there's nothing to submit.
@@ -7188,6 +7497,37 @@ TEST_P(VulkanPerformanceCounterTest, FBOChangeAndBackDoesNotBreakRenderPass)
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+    drawQuad(drawRed, essl1_shaders::PositionAttrib(), 0);
+
+    // Verify render pass count.
+    EXPECT_EQ(getPerfCounters().renderPasses, expectedRenderPassCount);
+
+    EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::red);
+}
+
+// Verify that changing framebuffer and issue a (nop or deferred) clear and change framebuffer back
+// doesn't break the render pass.
+TEST_P(VulkanPerformanceCounterTest, FBOChangeAndClearAndBackDoesNotBreakRenderPass)
+{
+    // switch to FBO and issue clear on fbo and then switch back to default framebuffer
+    GLFramebuffer framebuffer;
+    GLTexture texture;
+    setupForColorOpsTest(&framebuffer, &texture);
+    glClearColor(0.0f, 1.0f, 0.0f, 1.0f);  // clear to green
+    glClear(GL_COLOR_BUFFER_BIT);
+    EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::green);
+
+    uint64_t expectedRenderPassCount = getPerfCounters().renderPasses + 1;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    ANGLE_GL_PROGRAM(drawRed, essl3_shaders::vs::Simple(), essl3_shaders::fs::Red());
+    drawQuad(drawRed, essl1_shaders::PositionAttrib(), 0);
+
+    // switch to FBO and issue a deferred clear on fbo and then switch back to default framebuffer
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     drawQuad(drawRed, essl1_shaders::PositionAttrib(), 0);
 
     // Verify render pass count.

@@ -468,10 +468,10 @@ bool ProgramD3DMetadata::usesViewScale() const
     return mUsesViewScale;
 }
 
-bool ProgramD3DMetadata::hasANGLEMultiviewEnabled() const
+bool ProgramD3DMetadata::hasMultiviewEnabled() const
 {
     const rx::ShaderD3D *shader = mAttachedShaders[gl::ShaderType::Vertex];
-    return (shader && shader->hasANGLEMultiviewEnabled());
+    return (shader && shader->hasMultiviewEnabled());
 }
 
 bool ProgramD3DMetadata::usesVertexID() const
@@ -535,6 +535,12 @@ bool ProgramD3DMetadata::usesCustomOutVars() const
         default:
             return version >= 300;
     }
+}
+
+bool ProgramD3DMetadata::usesSampleMask() const
+{
+    const rx::ShaderD3D *shader = mAttachedShaders[gl::ShaderType::Fragment];
+    return (shader && shader->usesSampleMask());
 }
 
 const ShaderD3D *ProgramD3DMetadata::getFragmentShader() const
@@ -739,7 +745,7 @@ bool ProgramD3D::usesGetDimensionsIgnoresBaseLevel() const
 
 bool ProgramD3D::usesGeometryShader(const gl::State &state, const gl::PrimitiveMode drawMode) const
 {
-    if (mHasANGLEMultiviewEnabled && !mRenderer->canSelectViewInVertexShader())
+    if (mHasMultiviewEnabled && !mRenderer->canSelectViewInVertexShader())
     {
         return true;
     }
@@ -1091,10 +1097,16 @@ std::unique_ptr<rx::LinkEvent> ProgramD3D::load(const gl::Context *context,
     for (size_t uniformIndex = 0; uniformIndex < uniformCount; uniformIndex++)
     {
         const gl::LinkedUniform &linkedUniform = linkedUniforms[uniformIndex];
-
-        D3DUniform *d3dUniform =
-            new D3DUniform(linkedUniform.type, HLSLRegisterType::None, linkedUniform.name,
-                           linkedUniform.arraySizes, linkedUniform.isInDefaultBlock());
+        // Could D3DUniform just change to use unsigned int instead of std::vector for arraySizes?
+        // Frontend always flatten the array to at most 1D array.
+        std::vector<unsigned int> arraySizes;
+        if (linkedUniform.isArray())
+        {
+            arraySizes.push_back(linkedUniform.getBasicTypeElementCount());
+        }
+        D3DUniform *d3dUniform = new D3DUniform(linkedUniform.getType(), HLSLRegisterType::None,
+                                                mState.getUniformNames()[uniformIndex], arraySizes,
+                                                linkedUniform.isInDefaultBlock());
         stream->readEnum(&d3dUniform->regType);
         for (gl::ShaderType shaderType : gl::AllShaderTypes())
         {
@@ -1147,7 +1159,8 @@ std::unique_ptr<rx::LinkEvent> ProgramD3D::load(const gl::Context *context,
     }
 
     stream->readEnum(&mFragDepthUsage);
-    stream->readBool(&mHasANGLEMultiviewEnabled);
+    stream->readBool(&mUsesSampleMask);
+    stream->readBool(&mHasMultiviewEnabled);
     stream->readBool(&mUsesVertexID);
     stream->readBool(&mUsesViewID);
     stream->readBool(&mUsesPointSize);
@@ -1167,8 +1180,8 @@ std::unique_ptr<rx::LinkEvent> ProgramD3D::load(const gl::Context *context,
 
     stream->readString(&mGeometryShaderPreamble);
 
-    return std::make_unique<LoadBinaryLinkEvent>(context, context->getWorkerThreadPool(), this,
-                                                 stream, infoLog);
+    return std::make_unique<LoadBinaryLinkEvent>(context, context->getShaderCompileThreadPool(),
+                                                 this, stream, infoLog);
 }
 
 angle::Result ProgramD3D::loadBinaryShaderExecutables(d3d::Context *contextD3D,
@@ -1443,7 +1456,8 @@ void ProgramD3D::save(const gl::Context *context, gl::BinaryOutputStream *stream
     }
 
     stream->writeEnum(mFragDepthUsage);
-    stream->writeBool(mHasANGLEMultiviewEnabled);
+    stream->writeBool(mUsesSampleMask);
+    stream->writeBool(mHasMultiviewEnabled);
     stream->writeBool(mUsesVertexID);
     stream->writeBool(mUsesViewID);
     stream->writeBool(mUsesPointSize);
@@ -1565,7 +1579,7 @@ angle::Result ProgramD3D::getPixelExecutableForCachedOutputLayout(
     }
 
     std::string pixelHLSL = mDynamicHLSL->generatePixelShaderForOutputSignature(
-        mShaderHLSL[gl::ShaderType::Fragment], mPixelShaderKey, mFragDepthUsage,
+        mShaderHLSL[gl::ShaderType::Fragment], mPixelShaderKey, mFragDepthUsage, mUsesSampleMask,
         mPixelShaderOutputLayoutCache, mShaderStorageBlocks[gl::ShaderType::Fragment],
         mPixelShaderKey.size());
 
@@ -1675,9 +1689,9 @@ angle::Result ProgramD3D::getGeometryExecutableForPrimitiveType(d3d::Context *co
     }
     const gl::Caps &caps     = state.getCaps();
     std::string geometryHLSL = mDynamicHLSL->generateGeometryShaderHLSL(
-        caps, geometryShaderType, mState, mRenderer->presentPathFastEnabled(),
-        mHasANGLEMultiviewEnabled, mRenderer->canSelectViewInVertexShader(),
-        usesGeometryShaderForPointSpriteEmulation(), mGeometryShaderPreamble);
+        caps, geometryShaderType, mState, mRenderer->presentPathFastEnabled(), mHasMultiviewEnabled,
+        mRenderer->canSelectViewInVertexShader(), usesGeometryShaderForPointSpriteEmulation(),
+        mGeometryShaderPreamble);
 
     gl::InfoLog tempInfoLog;
     gl::InfoLog *currentInfoLog = infoLog ? infoLog : &tempInfoLog;
@@ -1981,9 +1995,9 @@ std::unique_ptr<LinkEvent> ProgramD3D::compileProgramExecutables(const gl::Conte
     const ShaderD3D *fragmentShaderD3D =
         fragmentShader ? GetImplAs<ShaderD3D>(fragmentShader) : nullptr;
 
-    return std::make_unique<GraphicsProgramLinkEvent>(infoLog, context->getWorkerThreadPool(),
-                                                      vertexTask, pixelTask, geometryTask, useGS,
-                                                      vertexShaderD3D, fragmentShaderD3D);
+    return std::make_unique<GraphicsProgramLinkEvent>(
+        infoLog, context->getShaderCompileThreadPool(), vertexTask, pixelTask, geometryTask, useGS,
+        vertexShaderD3D, fragmentShaderD3D);
 }
 
 std::unique_ptr<LinkEvent> ProgramD3D::compileComputeExecutable(const gl::Context *context,
@@ -2010,7 +2024,7 @@ std::unique_ptr<LinkEvent> ProgramD3D::compileComputeExecutable(const gl::Contex
     }
     else
     {
-        waitableEvent = context->getWorkerThreadPool()->postWorkerTask(computeTask);
+        waitableEvent = context->getShaderCompileThreadPool()->postWorkerTask(computeTask);
     }
 
     return std::make_unique<ComputeProgramLinkEvent>(infoLog, computeTask, waitableEvent);
@@ -2170,10 +2184,11 @@ std::unique_ptr<LinkEvent> ProgramD3D::link(const gl::Context *context,
         const ShaderD3D *vertexShader = shadersD3D[gl::ShaderType::Vertex];
         mUsesPointSize                = vertexShader && vertexShader->usesPointSize();
         mDynamicHLSL->getPixelShaderOutputKey(data, mState, metadata, &mPixelShaderKey);
-        mFragDepthUsage           = metadata.getFragDepthUsage();
-        mUsesVertexID             = metadata.usesVertexID();
-        mUsesViewID               = metadata.usesViewID();
-        mHasANGLEMultiviewEnabled = metadata.hasANGLEMultiviewEnabled();
+        mFragDepthUsage      = metadata.getFragDepthUsage();
+        mUsesSampleMask      = metadata.usesSampleMask();
+        mUsesVertexID        = metadata.usesVertexID();
+        mUsesViewID          = metadata.usesViewID();
+        mHasMultiviewEnabled = metadata.hasMultiviewEnabled();
 
         // Cache if we use flat shading
         mUsesFlatInterpolation = FindFlatInterpolationVarying(context, mState.getAttachedShaders());
@@ -2181,7 +2196,7 @@ std::unique_ptr<LinkEvent> ProgramD3D::link(const gl::Context *context,
         if (mRenderer->getMajorShaderModel() >= 4)
         {
             mGeometryShaderPreamble = mDynamicHLSL->generateGeometryShaderPreamble(
-                varyingPacking, builtins, mHasANGLEMultiviewEnabled,
+                varyingPacking, builtins, mHasMultiviewEnabled,
                 metadata.canSelectViewInVertexShader());
         }
 
@@ -2623,12 +2638,13 @@ void ProgramD3D::defineUniformsAndAssignRegisters(const gl::Context *context)
     }
 
     // Initialize the D3DUniform list to mirror the indexing of the GL layer.
-    for (const gl::LinkedUniform &glUniform : mState.getUniforms())
+    for (GLuint index = 0; index < static_cast<GLuint>(mState.getUniforms().size()); index++)
     {
+        const gl::LinkedUniform &glUniform = mState.getUniforms()[index];
         if (!glUniform.isInDefaultBlock())
             continue;
 
-        std::string name = glUniform.name;
+        std::string name = mState.getUniformNames()[index];
         if (glUniform.isArray())
         {
             // In the program state, array uniform names include [0] as in the program resource
@@ -3066,10 +3082,11 @@ void ProgramD3D::reset()
         mShaderHLSL[shaderType].clear();
     }
 
-    mFragDepthUsage           = FragDepthUsage::Unused;
-    mHasANGLEMultiviewEnabled = false;
-    mUsesVertexID             = false;
-    mUsesViewID               = false;
+    mFragDepthUsage      = FragDepthUsage::Unused;
+    mUsesSampleMask      = false;
+    mHasMultiviewEnabled = false;
+    mUsesVertexID        = false;
+    mUsesViewID          = false;
     mPixelShaderKey.clear();
     mUsesPointSize         = false;
     mUsesFlatInterpolation = false;
@@ -3330,9 +3347,10 @@ void ProgramD3D::getUniformInternal(GLint location, DestT *dataOut) const
     const D3DUniform *targetUniform = getD3DUniformFromLocation(location);
     const uint8_t *srcPointer       = targetUniform->getDataPtrToElement(locationInfo.arrayIndex);
 
-    if (gl::IsMatrixType(uniform.type))
+    if (gl::IsMatrixType(uniform.getType()))
     {
-        GetMatrixUniform(uniform.type, dataOut, reinterpret_cast<const DestT *>(srcPointer), true);
+        GetMatrixUniform(uniform.getType(), dataOut, reinterpret_cast<const DestT *>(srcPointer),
+                         true);
     }
     else
     {

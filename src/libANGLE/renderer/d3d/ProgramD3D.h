@@ -12,13 +12,13 @@
 #include <string>
 #include <vector>
 
-#include "compiler/translator/blocklayoutHLSL.h"
+#include "compiler/translator/hlsl/blocklayoutHLSL.h"
 #include "libANGLE/Constants.h"
 #include "libANGLE/formatutils.h"
 #include "libANGLE/renderer/ProgramImpl.h"
 #include "libANGLE/renderer/d3d/DynamicHLSL.h"
 #include "libANGLE/renderer/d3d/RendererD3D.h"
-#include "platform/FeaturesD3D_autogen.h"
+#include "platform/autogen/FeaturesD3D_autogen.h"
 
 namespace rx
 {
@@ -158,7 +158,7 @@ class ProgramD3DMetadata final : angle::NonCopyable
     bool usesPointSize() const;
     bool usesInsertedPointCoordValue() const;
     bool usesViewScale() const;
-    bool hasANGLEMultiviewEnabled() const;
+    bool hasMultiviewEnabled() const;
     bool usesVertexID() const;
     bool usesViewID() const;
     bool canSelectViewInVertexShader() const;
@@ -167,6 +167,7 @@ class ProgramD3DMetadata final : angle::NonCopyable
     bool usesSystemValuePointSize() const;
     bool usesMultipleFragmentOuts() const;
     bool usesCustomOutVars() const;
+    bool usesSampleMask() const;
     const ShaderD3D *getFragmentShader() const;
     FragDepthUsage getFragDepthUsage() const;
     uint8_t getClipDistanceArraySize() const;
@@ -421,10 +422,11 @@ class ProgramD3D : public ProgramImpl
         }
 
         const std::vector<GLenum> &outputSignature() const { return mOutputSignature; }
+
         ShaderExecutableD3D *shaderExecutable() const { return mShaderExecutable; }
 
       private:
-        std::vector<GLenum> mOutputSignature;
+        const std::vector<GLenum> mOutputSignature;
         ShaderExecutableD3D *mShaderExecutable;
     };
 
@@ -550,7 +552,8 @@ class ProgramD3D : public ProgramImpl
     gl::ShaderMap<CompilerWorkaroundsD3D> mShaderWorkarounds;
 
     FragDepthUsage mFragDepthUsage;
-    bool mHasANGLEMultiviewEnabled;
+    bool mUsesSampleMask;
+    bool mHasMultiviewEnabled;
     bool mUsesVertexID;
     bool mUsesViewID;
     std::vector<PixelShaderOutputVariable> mPixelShaderKey;

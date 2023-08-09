@@ -434,6 +434,14 @@ void TParseContext::errorIfPLSDeclared(const TSourceLoc &loc, PLSIllegalOperatio
             error(loc, "value not assignable when pixel local storage is declared",
                   "gl_SampleMask");
             break;
+        case PLSIllegalOperations::FragDataIndexNonzero:
+            error(loc, "illegal nonzero index qualifier when pixel local storage is declared",
+                  "layout");
+            break;
+        case PLSIllegalOperations::EnableAdvancedBlendEquation:
+            error(loc, "illegal advanced blend equation when pixel local storage is declared",
+                  "layout");
+            break;
     }
 }
 
@@ -618,11 +626,13 @@ bool TParseContext::checkCanBeLValue(const TSourceLoc &line, const char *op, TIn
         case EvqGeometryIn:
         case EvqTessControlIn:
         case EvqTessEvaluationIn:
+        case EvqSmoothIn:
         case EvqFlatIn:
         case EvqNoPerspectiveIn:
-        case EvqSmoothIn:
         case EvqCentroidIn:
         case EvqSampleIn:
+        case EvqNoPerspectiveCentroidIn:
+        case EvqNoPerspectiveSampleIn:
             message = "can't modify an input";
             break;
         case EvqUniform:
@@ -2937,7 +2947,9 @@ TPublicType TParseContext::addFullySpecifiedType(const TTypeQualifierBuilder &ty
     checkEarlyFragmentTestsIsNotSpecified(typeSpecifier.getLine(),
                                           returnType.layoutQualifier.earlyFragmentTests);
 
-    if (returnType.qualifier == EvqSampleIn || returnType.qualifier == EvqSampleOut)
+    if (returnType.qualifier == EvqSampleIn || returnType.qualifier == EvqSampleOut ||
+        returnType.qualifier == EvqNoPerspectiveSampleIn ||
+        returnType.qualifier == EvqNoPerspectiveSampleOut)
     {
         mSampleQualifierSpecified = true;
     }
@@ -3213,20 +3225,27 @@ void TParseContext::checkTessellationShaderUnsizedArraysAndSetSize(const TSource
         {
             case EvqTessControlIn:
             case EvqTessEvaluationIn:
-            case EvqFlatIn:
-            case EvqCentroidIn:
             case EvqSmoothIn:
+            case EvqFlatIn:
+            case EvqNoPerspectiveIn:
+            case EvqCentroidIn:
             case EvqSampleIn:
+            case EvqNoPerspectiveCentroidIn:
+            case EvqNoPerspectiveSampleIn:
                 // Declaring an array size is optional. If no size is specified, it will be taken
                 // from the implementation-dependent maximum patch size (gl_MaxPatchVertices).
                 ASSERT(mMaxPatchVertices > 0);
                 type->sizeOutermostUnsizedArray(mMaxPatchVertices);
                 break;
             case EvqTessControlOut:
-            case EvqFlatOut:
-            case EvqCentroidOut:
+            case EvqTessEvaluationOut:
             case EvqSmoothOut:
+            case EvqFlatOut:
+            case EvqNoPerspectiveOut:
+            case EvqCentroidOut:
             case EvqSampleOut:
+            case EvqNoPerspectiveCentroidOut:
+            case EvqNoPerspectiveSampleOut:
                 // Declaring an array size is optional. If no size is specified, it will be taken
                 // from output patch size declared in the shader.  If the patch size is not yet
                 // declared, this is deferred until such time as it does.
@@ -4177,6 +4196,7 @@ void TParseContext::parseGlobalLayoutQualifier(const TTypeQualifierBuilder &type
             return;
         }
 
+        errorIfPLSDeclared(typeQualifier.line, PLSIllegalOperations::EnableAdvancedBlendEquation);
         mAdvancedBlendEquations |= layoutQualifier.advancedBlendEquations;
     }
     else if (typeQualifier.qualifier == EvqTessControlOut)
@@ -4926,14 +4946,20 @@ TIntermDeclaration *TParseContext::addInterfaceBlock(
                 }
                 break;
             // a member variable in io block may have different interpolation.
+            case EvqSmoothIn:
+            case EvqSmoothOut:
             case EvqFlatIn:
             case EvqFlatOut:
             case EvqNoPerspectiveIn:
             case EvqNoPerspectiveOut:
-            case EvqSmoothIn:
-            case EvqSmoothOut:
             case EvqCentroidIn:
             case EvqCentroidOut:
+            case EvqSampleIn:
+            case EvqSampleOut:
+            case EvqNoPerspectiveCentroidIn:
+            case EvqNoPerspectiveCentroidOut:
+            case EvqNoPerspectiveSampleIn:
+            case EvqNoPerspectiveSampleOut:
                 break;
             // a member variable can have an incomplete qualifier because shader io block has either
             // in or out.
@@ -4941,6 +4967,9 @@ TIntermDeclaration *TParseContext::addInterfaceBlock(
             case EvqFlat:
             case EvqNoPerspective:
             case EvqCentroid:
+            case EvqSample:
+            case EvqNoPerspectiveCentroid:
+            case EvqNoPerspectiveSample:
             case EvqGeometryIn:
             case EvqGeometryOut:
                 if (!IsShaderIoBlock(typeQualifier.qualifier) &&
@@ -5234,10 +5263,16 @@ TIntermTyped *TParseContext::addIndexExpression(TIntermTyped *baseExpression,
                     break;
             }
         }
-        else if (baseExpression->getQualifier() == EvqFragmentOut)
+        else if (baseExpression->getQualifier() == EvqFragmentOut ||
+                 baseExpression->getQualifier() == EvqFragmentInOut)
         {
             error(location,
                   "array indexes for fragment outputs must be constant integral expressions", "[");
+        }
+        else if (baseExpression->getQualifier() == EvqLastFragData)
+        {
+            error(location,
+                  "array indexes for gl_LastFragData must be constant integral expressions", "[");
         }
         else if (mShaderSpec == SH_WEBGL2_SPEC && baseExpression->getQualifier() == EvqFragData)
         {
@@ -5811,7 +5846,7 @@ TLayoutQualifier TParseContext::parseLayoutQualifier(const ImmutableString &qual
         {
             qualifier.depth = EdLess;
         }
-        else if (qualifierType == "depth_unchanged")
+        else if (qualifierType == "depth_unchanged" && !sh::IsWebGLBasedSpec(mShaderSpec))
         {
             qualifier.depth = EdUnchanged;
         }
@@ -6044,6 +6079,10 @@ TLayoutQualifier TParseContext::parseLayoutQualifier(const ImmutableString &qual
              checkCanUseExtension(qualifierTypeLine, TExtension::EXT_blend_func_extended))
     {
         parseIndexLayoutQualifier(intValue, intValueLine, intValueString, &qualifier.index);
+        if (intValue != 0)
+        {
+            errorIfPLSDeclared(qualifierTypeLine, PLSIllegalOperations::FragDataIndexNonzero);
+        }
     }
     else if (qualifierType == "vertices" && mShaderType == GL_TESS_CONTROL_SHADER_EXT &&
              (mShaderVersion >= 320 ||
@@ -6376,6 +6415,25 @@ TTypeSpecifierNonArray TParseContext::addStructure(const TSourceLoc &structLine,
         {
             error(field.line(), "invalid qualifier on struct member", "invariant");
         }
+
+        const TLayoutQualifier layoutQualifier = field.type()->getLayoutQualifier();
+        if (!layoutQualifier.isEmpty())
+        {
+            error(field.line(), "invalid layout qualifier on struct member", "layout");
+        }
+
+        const TMemoryQualifier memoryQualifier = field.type()->getMemoryQualifier();
+        if (!memoryQualifier.isEmpty())
+        {
+            error(field.line(), "invalid memory qualifier on struct member",
+                  memoryQualifier.getAnyQualifierString());
+        }
+
+        if (field.type()->isPrecise())
+        {
+            error(field.line(), "invalid precise qualifier on struct member", "precise");
+        }
+
         // ESSL 3.10 section 4.1.8 -- atomic_uint or images are not allowed as structure member.
         // ANGLE_shader_pixel_local_storage also disallows PLS as struct members.
         if (IsImage(field.type()->getBasicType()) ||
