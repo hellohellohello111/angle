@@ -17,11 +17,13 @@
 #include "common/string_utils.h"
 #include "common/system_utils.h"
 #include "gpu_info_util/SystemInfo_internal.h"
+#include "libANGLE/histogram_macros.h"
 #include "libANGLE/renderer/metal/ContextMtl.h"
 #include "libANGLE/renderer/metal/DisplayMtl.h"
 #include "libANGLE/renderer/metal/RenderTargetMtl.h"
 #include "libANGLE/renderer/metal/mtl_render_utils.h"
 #include "libANGLE/renderer/metal/process.h"
+#include "platform/PlatformMethods.h"
 
 // Compiler can turn on programmatical frame capture in release build by defining
 // ANGLE_METAL_FRAME_CAPTURE flag.
@@ -279,21 +281,21 @@ bool GetCompressedBufferSizeAndRowLengthForTextureWithFormat(const TextureRef &t
                                                              size_t *bytesPerImageOut)
 {
     gl::Extents size = texture->size(index);
-    GLuint bufferSizeInBytes;
+    ASSERT(size.depth == 1);
     GLuint bufferRowInBytes;
-    if (!textureObjFormat.intendedInternalFormat().computeCompressedImageSize(size,
-                                                                              &bufferSizeInBytes))
+    if (!textureObjFormat.intendedInternalFormat().computeCompressedImageRowPitch(
+            size.width, &bufferRowInBytes))
     {
         return false;
     }
-    size.height = 1;
-    if (!textureObjFormat.intendedInternalFormat().computeCompressedImageSize(size,
-                                                                              &bufferRowInBytes))
+    GLuint bufferSizeInBytes;
+    if (!textureObjFormat.intendedInternalFormat().computeCompressedImageDepthPitch(
+            size.height, bufferRowInBytes, &bufferSizeInBytes))
     {
         return false;
     }
-    *bytesPerImageOut = bufferSizeInBytes;
     *bytesPerRowOut   = bufferRowInBytes;
+    *bytesPerImageOut = bufferSizeInBytes;
     return true;
 }
 static angle::Result InitializeCompressedTextureContents(const gl::Context *context,
@@ -315,6 +317,12 @@ static angle::Result InitializeCompressedTextureContents(const gl::Context *cont
     gl::Extents extents    = texture->size(index);
     if (texture->isCPUAccessible())
     {
+        if (textureObjFormat.isPVRTC())
+        {
+            // Replace Region Validation: rowBytes must be 0
+            bytesPerRow = 0;
+        }
+
         angle::MemoryBuffer buffer;
         if (!buffer.resize(bytesPerImage))
         {
@@ -350,7 +358,8 @@ static angle::Result InitializeCompressedTextureContents(const gl::Context *cont
 
 bool PreferStagedTextureUploads(const gl::Context *context,
                                 const TextureRef &texture,
-                                const Format &textureObjFormat)
+                                const Format &textureObjFormat,
+                                StagingPurpose purpose)
 {
     // The simulator MUST upload all textures as staged.
     if (TARGET_OS_SIMULATOR)
@@ -367,9 +376,16 @@ bool PreferStagedTextureUploads(const gl::Context *context,
         return false;
     }
 
+    // If the intended internal format is luminance, we can still
+    // initialize the texture using the GPU. However, if we're
+    // uploading data to it, we avoid using a staging buffer, due to
+    // the (current) need to re-pack the data from L8 -> RGBA8 and LA8
+    // -> RGBA8. This could be better optimized by emulating L8
+    // textures with R8 and LA8 with RG8, and using swizzlig for the
+    // resulting textures.
     if (intendedInternalFormat.isLUMA())
     {
-        return false;
+        return (purpose == StagingPurpose::Initialization);
     }
 
     if (features.disableStagedInitializationOfPackedTextureFormats.enabled)
@@ -401,13 +417,22 @@ angle::Result InitializeTextureContents(const gl::Context *context,
 
     const gl::InternalFormat &intendedInternalFormat = textureObjFormat.intendedInternalFormat();
 
-    bool preferGPUInitialization = PreferStagedTextureUploads(context, texture, textureObjFormat);
+    bool preferGPUInitialization = PreferStagedTextureUploads(context, texture, textureObjFormat,
+                                                              StagingPurpose::Initialization);
 
     // This function is called in many places to initialize the content of a texture.
     // So it's better we do the initial check here instead of let the callers do it themselves:
     if (!textureObjFormat.valid())
     {
         return angle::Result::Continue;
+    }
+
+    if ((textureObjFormat.hasDepthOrStencilBits() && !textureObjFormat.getCaps().depthRenderable) ||
+        !textureObjFormat.getCaps().colorRenderable)
+    {
+        // Texture is not appropriately color- or depth-renderable, so do not attempt
+        // to use GPU initialization (clears for initialization).
+        preferGPUInitialization = false;
     }
 
     gl::Extents size = texture->size(index);
@@ -900,6 +925,9 @@ AutoObjCPtr<id<MTLLibrary>> CreateShaderLibrary(
             options.preprocessorMacros = macroDict;
         }
 
+        auto *platform   = ANGLEPlatformCurrent();
+        double startTime = platform->currentTime(platform);
+
         auto library = metalDevice.newLibraryWithSource(nsSource, options, &nsError);
         if (angle::GetEnvironmentVar(kANGLEPrintMSLEnv)[0] == '1')
         {
@@ -907,6 +935,10 @@ AutoObjCPtr<id<MTLLibrary>> CreateShaderLibrary(
         }
         [nsSource ANGLE_MTL_AUTORELEASE];
         *errorOut = std::move(nsError);
+
+        double endTime = platform->currentTime(platform);
+        int us         = static_cast<int>((endTime - startTime) * 1000'000.0);
+        ANGLE_HISTOGRAM_COUNTS("GPU.ANGLE.MetalShaderCompilationTimeUs", us);
 
         return library;
     }
@@ -1041,6 +1073,10 @@ MTLTextureType GetTextureType(gl::TextureType glType)
     {
         case gl::TextureType::_2D:
             return MTLTextureType2D;
+        case gl::TextureType::_2DArray:
+            return MTLTextureType2DArray;
+        case gl::TextureType::_3D:
+            return MTLTextureType3D;
         case gl::TextureType::CubeMap:
             return MTLTextureTypeCube;
         default:
@@ -1105,47 +1141,47 @@ MTLSamplerAddressMode GetSamplerAddressMode(GLenum wrap)
     }
 }
 
-MTLBlendFactor GetBlendFactor(GLenum factor)
+MTLBlendFactor GetBlendFactor(gl::BlendFactorType factor)
 {
     switch (factor)
     {
-        case GL_ZERO:
+        case gl::BlendFactorType::Zero:
             return MTLBlendFactorZero;
-        case GL_ONE:
+        case gl::BlendFactorType::One:
             return MTLBlendFactorOne;
-        case GL_SRC_COLOR:
+        case gl::BlendFactorType::SrcColor:
             return MTLBlendFactorSourceColor;
-        case GL_ONE_MINUS_SRC_COLOR:
+        case gl::BlendFactorType::OneMinusSrcColor:
             return MTLBlendFactorOneMinusSourceColor;
-        case GL_SRC_ALPHA:
+        case gl::BlendFactorType::SrcAlpha:
             return MTLBlendFactorSourceAlpha;
-        case GL_ONE_MINUS_SRC_ALPHA:
+        case gl::BlendFactorType::OneMinusSrcAlpha:
             return MTLBlendFactorOneMinusSourceAlpha;
-        case GL_DST_COLOR:
+        case gl::BlendFactorType::DstColor:
             return MTLBlendFactorDestinationColor;
-        case GL_ONE_MINUS_DST_COLOR:
+        case gl::BlendFactorType::OneMinusDstColor:
             return MTLBlendFactorOneMinusDestinationColor;
-        case GL_DST_ALPHA:
+        case gl::BlendFactorType::DstAlpha:
             return MTLBlendFactorDestinationAlpha;
-        case GL_ONE_MINUS_DST_ALPHA:
+        case gl::BlendFactorType::OneMinusDstAlpha:
             return MTLBlendFactorOneMinusDestinationAlpha;
-        case GL_SRC_ALPHA_SATURATE:
+        case gl::BlendFactorType::SrcAlphaSaturate:
             return MTLBlendFactorSourceAlphaSaturated;
-        case GL_CONSTANT_COLOR:
+        case gl::BlendFactorType::ConstantColor:
             return MTLBlendFactorBlendColor;
-        case GL_ONE_MINUS_CONSTANT_COLOR:
+        case gl::BlendFactorType::OneMinusConstantColor:
             return MTLBlendFactorOneMinusBlendColor;
-        case GL_CONSTANT_ALPHA:
+        case gl::BlendFactorType::ConstantAlpha:
             return MTLBlendFactorBlendAlpha;
-        case GL_ONE_MINUS_CONSTANT_ALPHA:
+        case gl::BlendFactorType::OneMinusConstantAlpha:
             return MTLBlendFactorOneMinusBlendAlpha;
-        case GL_SRC1_COLOR_EXT:
+        case gl::BlendFactorType::Src1Color:
             return MTLBlendFactorSource1Color;
-        case GL_ONE_MINUS_SRC1_COLOR_EXT:
+        case gl::BlendFactorType::OneMinusSrc1Color:
             return MTLBlendFactorOneMinusSource1Color;
-        case GL_SRC1_ALPHA_EXT:
+        case gl::BlendFactorType::Src1Alpha:
             return MTLBlendFactorSource1Alpha;
-        case GL_ONE_MINUS_SRC1_ALPHA_EXT:
+        case gl::BlendFactorType::OneMinusSrc1Alpha:
             return MTLBlendFactorOneMinusSource1Alpha;
         default:
             UNREACHABLE();
@@ -1153,19 +1189,19 @@ MTLBlendFactor GetBlendFactor(GLenum factor)
     }
 }
 
-MTLBlendOperation GetBlendOp(GLenum op)
+MTLBlendOperation GetBlendOp(gl::BlendEquationType op)
 {
     switch (op)
     {
-        case GL_FUNC_ADD:
+        case gl::BlendEquationType::Add:
             return MTLBlendOperationAdd;
-        case GL_FUNC_SUBTRACT:
+        case gl::BlendEquationType::Subtract:
             return MTLBlendOperationSubtract;
-        case GL_FUNC_REVERSE_SUBTRACT:
+        case gl::BlendEquationType::ReverseSubtract:
             return MTLBlendOperationReverseSubtract;
-        case GL_MIN:
+        case gl::BlendEquationType::Min:
             return MTLBlendOperationMin;
-        case GL_MAX:
+        case gl::BlendEquationType::Max:
             return MTLBlendOperationMax;
         default:
             UNREACHABLE();
@@ -1439,7 +1475,7 @@ NSUInteger GetMaxNumberOfRenderTargetsForDevice(const mtl::ContextDevice &device
 
 bool DeviceHasMaximumRenderTargetSize(id<MTLDevice> device)
 {
-    return SupportsAppleGPUFamily(device, 1);
+    return !SupportsMacGPUFamily(device, 1);
 }
 
 bool SupportsAppleGPUFamily(id<MTLDevice> device, uint8_t appleFamily)

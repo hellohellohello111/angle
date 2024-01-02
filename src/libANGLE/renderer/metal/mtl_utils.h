@@ -33,9 +33,16 @@ void StopFrameCapture();
 namespace mtl
 {
 
+enum class StagingPurpose
+{
+    Initialization,
+    Upload
+};
+
 bool PreferStagedTextureUploads(const gl::Context *context,
                                 const TextureRef &texture,
-                                const Format &textureObjFormat);
+                                const Format &textureObjFormat,
+                                const StagingPurpose purpose);
 
 // Initialize texture content to black.
 angle::Result InitializeTextureContents(const gl::Context *context,
@@ -150,8 +157,8 @@ MTLSamplerMinMagFilter GetFilter(GLenum filter);
 MTLSamplerMipFilter GetMipmapFilter(GLenum filter);
 MTLSamplerAddressMode GetSamplerAddressMode(GLenum wrap);
 
-MTLBlendFactor GetBlendFactor(GLenum factor);
-MTLBlendOperation GetBlendOp(GLenum op);
+MTLBlendFactor GetBlendFactor(gl::BlendFactorType factor);
+MTLBlendOperation GetBlendOp(gl::BlendEquationType op);
 
 MTLCompareFunction GetCompareFunc(GLenum func);
 MTLStencilOperation GetStencilOp(GLenum op);
