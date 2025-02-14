@@ -180,6 +180,7 @@ angle::Result QueryMtl::isResultAvailable(const gl::Context *context, bool *avai
             break;
         default:
             UNIMPLEMENTED();
+            *available = true;
             break;
     }
     return angle::Result::Continue;
