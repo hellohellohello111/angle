@@ -1,0 +1,133 @@
+name: Build ANGLE with Depth Clear Fix
+on:
+  push:
+    branches:
+      - depth-clear-fix
+  workflow_dispatch:
+
+jobs:
+  build-angle:
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+    - name: Install depot_tools
+      run: |
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+        echo "$PWD/depot_tools" >> $GITHUB_PATH
+
+    - name: Clone upstream ANGLE
+      run: |
+        git clone https://chromium.googlesource.com/angle/angle.git
+        cd angle
+        echo "Upstream HEAD: $(git log -1 --oneline)"
+
+    - name: Apply metal freeze patch
+      run: |
+        cat > /tmp/patch_metal_freeze.py << 'PYEOF'
+        import sys
+        path = "angle/src/libANGLE/renderer/metal/QueryMtl.mm"
+        with open(path, "r") as f:
+            content = f.read()
+        fn = content.find("QueryMtl::isResultAvailable")
+        if fn == -1:
+            print("ERROR: isResultAvailable not found")
+            sys.exit(1)
+        marker = "UNIMPLEMENTED();"
+        idx = content.find(marker, fn)
+        if idx != -1:
+            insert_pos = idx + len(marker)
+            nl = content[insert_pos]
+            spaces = ""
+            j = insert_pos + 1
+            while j < len(content) and content[j] == " ":
+                spaces += " "
+                j += 1
+            content = content[:insert_pos] + "\n" + spaces + "*available = true;" + content[insert_pos:]
+            print("Metal freeze patch applied in isResultAvailable")
+        else:
+            print("WARNING: UNIMPLEMENTED not found in isResultAvailable")
+        with open(path, "w") as f:
+            f.write(content)
+        PYEOF
+        python3 /tmp/patch_metal_freeze.py
+
+    - name: Apply depth clear fix
+      run: |
+        cat > /tmp/patch_depth_clear.py << 'PYEOF'
+        import sys
+
+        path = "angle/src/libANGLE/renderer/metal/mtl_command_buffer.mm"
+        with open(path, "r") as f:
+            content = f.read()
+
+        # Find the RandomizeClearValue specialization for depth attachments.
+        # Original code randomizes clearDepth to a value in [0.0, 1.0].
+        # We change it to always use 1.0 (far plane) so that any shadow map
+        # texels not re-rendered this frame read as "no shadow" instead of
+        # random depth values that cause ghost shadow artifacts.
+
+        # Look for the depth clear randomization
+        marker = "attachment.clearDepth"
+        idx = content.find(marker)
+        if idx == -1:
+            print("ERROR: attachment.clearDepth not found")
+            sys.exit(1)
+
+        # Find the line containing the assignment
+        line_start = content.rfind("\n", 0, idx) + 1
+        line_end = content.find("\n", idx)
+        old_line = content[line_start:line_end]
+        print(f"Found depth clear line: {old_line.strip()}")
+
+        # Replace with fixed 1.0 clear value
+        new_line = old_line[:old_line.find("attachment.clearDepth")] + "attachment.clearDepth = 1.0;  // Fixed: always clear depth to far plane (was random)"
+        content = content[:line_start] + new_line + content[line_end:]
+
+        # Also remove the unused distribution variable if it only served the depth line
+        # (the random generator is still used by stencil, so leave it)
+
+        with open(path, "w") as f:
+            f.write(content)
+
+        print("Depth clear fix applied: random -> 1.0")
+
+        # Verify
+        with open(path, "r") as f:
+            for i, line in enumerate(f, 1):
+                if "clearDepth" in line:
+                    print(f"  Line {i}: {line.rstrip()}")
+        PYEOF
+        python3 /tmp/patch_depth_clear.py
+
+    - name: Sync dependencies
+      run: |
+        cd angle
+        python3 scripts/bootstrap.py
+        gclient sync
+
+    - name: Configure and build
+      run: |
+        cd angle
+        mkdir -p out/Release
+        cat > out/Release/args.gn << 'GNEOF'
+        target_cpu="arm64"
+        is_debug=false
+        mac_sdk_min="12.0"
+        mac_min_system_version="12.0"
+        mac_deployment_target="12.0"
+        angle_enable_metal=true
+        angle_enable_swiftshader=false
+        angle_enable_vulkan=false
+        GNEOF
+        gn gen out/Release
+        autoninja -C out/Release libEGL libGLESv2
+        ls -la out/Release/libEGL.dylib out/Release/libGLESv2.dylib
+
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: angle-depth-clear-fix
+        path: |
+          angle/out/Release/libEGL.dylib
+          angle/out/Release/libGLESv2.dylib
