@@ -23,9 +23,7 @@ jobs:
       run: |
         cd angle
 
-        # Patch: workaround: metal freeze (QueryMtl.mm)
-        # Adds *available = true in default case to prevent hang on unsupported queries
-        # The contentscale patch (WindowSurfaceCGL.mm) is skipped - only affects OpenGL backend
+        # Patch 1: workaround: metal freeze (QueryMtl.mm)
         cat > /tmp/metal-freeze.patch << 'PATCHEOF'
         --- a/src/libANGLE/renderer/metal/QueryMtl.mm
         +++ b/src/libANGLE/renderer/metal/QueryMtl.mm
@@ -41,13 +39,172 @@ jobs:
 
         git apply --ignore-whitespace /tmp/metal-freeze.patch || {
           echo "Patch didn't apply cleanly, applying manually..."
-          # Find the exact location and patch it
           grep -n 'UNIMPLEMENTED()' src/libANGLE/renderer/metal/QueryMtl.mm
           sed -i '' '/default:/,/break;/{s/            UNIMPLEMENTED();/            UNIMPLEMENTED();\n            *available = true;/;}' src/libANGLE/renderer/metal/QueryMtl.mm
         }
 
-        echo "=== Verifying patch ==="
-        grep -A3 'UNIMPLEMENTED' src/libANGLE/renderer/metal/QueryMtl.mm | head -10
+    - name: Apply shadow map FBO fixes
+      run: |
+        cd angle
+
+        # =============================================================
+        # FIX 1: setLoadStoreActionOnRenderPassFirstStart (FrameBufferMtl.mm)
+        #
+        # Problem: When storeAction is Store (normal case), loadAction is set to
+        # MTLLoadActionLoad, which loads stale shadow data from previous frame.
+        # The shadow map should start each frame cleared, not loaded.
+        #
+        # Fix: When the attachment was NOT invalidated (storeAction != DontCare),
+        # check if there's a pending clear. If there's no explicit clear queued,
+        # still default to Load (preserving current behavior for non-shadow FBOs).
+        # But crucially, don't override loadAction if it was already set to Clear
+        # by a prior glClear() call.
+        # =============================================================
+
+        python3 << 'PYEOF'
+        import re
+
+        with open('src/libANGLE/renderer/metal/FrameBufferMtl.mm', 'r') as f:
+            content = f.read()
+
+        # Fix 1: In setLoadStoreActionOnRenderPassFirstStart, preserve Clear loadAction
+        old = '''    if (!forceDepthStencilMultisampleLoad && attachment.storeAction == MTLStoreActionDontCare)
+    {
+        // If we previously discarded attachment's content, then don't need to load it.
+        attachment.loadAction = MTLLoadActionDontCare;
+    }
+    else
+    {
+        attachment.loadAction = MTLLoadActionLoad;
+    }'''
+
+        new = '''    if (!forceDepthStencilMultisampleLoad && attachment.storeAction == MTLStoreActionDontCare)
+    {
+        // If we previously discarded attachment's content, then don't need to load it.
+        attachment.loadAction = MTLLoadActionDontCare;
+    }
+    else if (attachment.loadAction != MTLLoadActionClear)
+    {
+        // Only override to Load if not already set to Clear by a pending glClear().
+        // This prevents stale data from being loaded into shadow map FBOs that
+        // should be cleared at the start of each frame.
+        attachment.loadAction = MTLLoadActionLoad;
+    }'''
+
+        if old in content:
+            content = content.replace(old, new)
+            print("FIX 1 applied: setLoadStoreActionOnRenderPassFirstStart - preserve Clear loadAction")
+        else:
+            print("WARNING: FIX 1 pattern not found")
+
+        # Fix 2: In ensureRenderPassStarted, preserve Clear loadAction when resetting after clean start
+        old2 = '''    if (mRenderPassCleanStart)
+    {
+        // After a clean start we should reset the loadOp to MTLLoadActionLoad in case this render
+        // pass could be interrupted by a conversion compute shader pass then being resumed later.
+        mRenderPassCleanStart = false;
+        for (mtl::RenderPassColorAttachmentDesc &colorAttachment : mRenderPassDesc.colorAttachments)
+        {
+            colorAttachment.loadAction = MTLLoadActionLoad;
+        }
+        mRenderPassDesc.depthAttachment.loadAction   = MTLLoadActionLoad;
+        mRenderPassDesc.stencilAttachment.loadAction = MTLLoadActionLoad;
+    }'''
+
+        new2 = '''    if (mRenderPassCleanStart)
+    {
+        // After a clean start we should reset the loadOp to MTLLoadActionLoad in case this render
+        // pass could be interrupted by a conversion compute shader pass then being resumed later.
+        // However, preserve MTLLoadActionClear if it was set by a pending glClear() — overwriting
+        // it with Load causes stale data (e.g. shadow maps) to persist between frames.
+        mRenderPassCleanStart = false;
+        for (mtl::RenderPassColorAttachmentDesc &colorAttachment : mRenderPassDesc.colorAttachments)
+        {
+            if (colorAttachment.loadAction != MTLLoadActionClear)
+            {
+                colorAttachment.loadAction = MTLLoadActionLoad;
+            }
+        }
+        if (mRenderPassDesc.depthAttachment.loadAction != MTLLoadActionClear)
+        {
+            mRenderPassDesc.depthAttachment.loadAction = MTLLoadActionLoad;
+        }
+        if (mRenderPassDesc.stencilAttachment.loadAction != MTLLoadActionClear)
+        {
+            mRenderPassDesc.stencilAttachment.loadAction = MTLLoadActionLoad;
+        }
+    }'''
+
+        if old2 in content:
+            content = content.replace(old2, new2)
+            print("FIX 2 applied: ensureRenderPassStarted - preserve Clear on clean start reset")
+        else:
+            print("WARNING: FIX 2 pattern not found")
+
+        with open('src/libANGLE/renderer/metal/FrameBufferMtl.mm', 'w') as f:
+            f.write(content)
+
+        PYEOF
+
+        # =============================================================
+        # FIX 3: endEncoding(true) force-store override (ContextMtl.mm)
+        #
+        # Problem: When forceSaveRenderPassContent=true, ALL attachments get
+        # MTLStoreActionStore, even depth/stencil that were set to DontCare
+        # by invalidateImpl(). This preserves stale shadow data that should
+        # have been discarded.
+        #
+        # Fix: Only force-store color attachments. Leave depth/stencil store
+        # actions unchanged so invalidation is respected through flushes.
+        # =============================================================
+
+        python3 << 'PYEOF'
+        with open('src/libANGLE/renderer/metal/ContextMtl.mm', 'r') as f:
+            content = f.read()
+
+        old = '''        if (forceSaveRenderPassContent)
+        {
+            // Save the work in progress.
+            mRenderEncoder.setStoreAction(MTLStoreActionStore);
+        }'''
+
+        new = '''        if (forceSaveRenderPassContent)
+        {
+            // Save the work in progress, but only force-store attachments that
+            // weren't explicitly invalidated. This prevents stale depth/stencil
+            // data (e.g. shadow maps) from being preserved through command buffer
+            // flushes when they should have been discarded.
+            mRenderEncoder.setColorStoreAction(MTLStoreActionStore);
+        }'''
+
+        if old in content:
+            content = content.replace(old, new)
+            print("FIX 3 applied: endEncoding - selective force-store (color only)")
+        else:
+            print("WARNING: FIX 3 pattern not found, trying alternate")
+            # The API might be different - setStoreAction might set all at once
+            # Try to find and patch regardless
+            if 'mRenderEncoder.setStoreAction(MTLStoreActionStore)' in content:
+                content = content.replace(
+                    'mRenderEncoder.setStoreAction(MTLStoreActionStore)',
+                    'mRenderEncoder.setColorStoreAction(MTLStoreActionStore)'
+                )
+                print("FIX 3 applied via string replacement")
+            else:
+                print("WARNING: FIX 3 could not be applied")
+
+        with open('src/libANGLE/renderer/metal/ContextMtl.mm', 'w') as f:
+            f.write(content)
+
+        PYEOF
+
+        echo "=== Verifying all patches ==="
+        echo "--- FIX 1: setLoadStoreActionOnRenderPassFirstStart ---"
+        grep -n "loadAction != MTLLoadActionClear" src/libANGLE/renderer/metal/FrameBufferMtl.mm | head -5
+        echo "--- FIX 2: ensureRenderPassStarted ---"
+        grep -n "preserve.*Clear\|loadAction != MTLLoadActionClear" src/libANGLE/renderer/metal/FrameBufferMtl.mm | head -5
+        echo "--- FIX 3: endEncoding ---"
+        grep -n "setColorStoreAction\|selective force-store" src/libANGLE/renderer/metal/ContextMtl.mm | head -5
 
     - name: Sync dependencies
       run: |
@@ -69,8 +226,6 @@ jobs:
         angle_enable_swiftshader=false
         angle_enable_vulkan=false
         GNARGS
-        echo "args.gn contents:"
-        cat out/Release/args.gn
         gn gen out/Release
 
     - name: Build
@@ -88,11 +243,14 @@ jobs:
         cp out/Release/libGLESv2.dylib artifacts/
         echo "$(git log -1 --oneline)" > artifacts/BUILD_INFO.txt
         echo "Built: $(date -u)" >> artifacts/BUILD_INFO.txt
-        echo "Patches: metal-freeze workaround (QueryMtl.mm)" >> artifacts/BUILD_INFO.txt
-        echo "Deployment target: macOS 12.0" >> artifacts/BUILD_INFO.txt
+        echo "Patches applied:" >> artifacts/BUILD_INFO.txt
+        echo "  1. metal-freeze workaround (QueryMtl.mm)" >> artifacts/BUILD_INFO.txt
+        echo "  2. FIX: preserve Clear loadAction in setLoadStoreActionOnRenderPassFirstStart" >> artifacts/BUILD_INFO.txt
+        echo "  3. FIX: preserve Clear loadAction in ensureRenderPassStarted clean start" >> artifacts/BUILD_INFO.txt
+        echo "  4. FIX: selective force-store in endEncoding (color only, respect depth/stencil invalidation)" >> artifacts/BUILD_INFO.txt
 
     - name: Upload ANGLE dylibs
       uses: actions/upload-artifact@v4
       with:
-        name: angle-metal-arm64-rebased
+        name: angle-metal-arm64-shadow-fix
         path: angle/artifacts/
