@@ -6,7 +6,7 @@ jobs:
   build-angle:
     runs-on: macos-latest
     env:
-      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
     steps:
     - name: Install depot_tools
       run: |
@@ -23,8 +23,9 @@ jobs:
       run: |
         cd angle
 
-        # Patch 1: workaround: metal freeze (QueryMtl.mm)
-        # Adds *available = true in default case to prevent hang
+        # Patch: workaround: metal freeze (QueryMtl.mm)
+        # Adds *available = true in default case to prevent hang on unsupported queries
+        # The contentscale patch (WindowSurfaceCGL.mm) is skipped - only affects OpenGL backend
         cat > /tmp/metal-freeze.patch << 'PATCHEOF'
         --- a/src/libANGLE/renderer/metal/QueryMtl.mm
         +++ b/src/libANGLE/renderer/metal/QueryMtl.mm
@@ -38,38 +39,15 @@ jobs:
              return angle::Result::Continue;
         PATCHEOF
 
-        # Patch 2: opengl backend fix contentscale updates (WindowSurfaceCGL.mm)
-        cat > /tmp/contentscale.patch << 'PATCHEOF'
-        --- a/src/libANGLE/renderer/gl/cgl/WindowSurfaceCGL.mm
-        +++ b/src/libANGLE/renderer/gl/cgl/WindowSurfaceCGL.mm
-        @@ -258,7 +258,7 @@
-             unsigned height = getHeight();
-             auto &texture   = *mSwapState.beingRendered;
+        git apply --ignore-whitespace /tmp/metal-freeze.patch || {
+          echo "Patch didn't apply cleanly, applying manually..."
+          # Find the exact location and patch it
+          grep -n 'UNIMPLEMENTED()' src/libANGLE/renderer/metal/QueryMtl.mm
+          sed -i '' '/default:/,/break;/{s/            UNIMPLEMENTED();/            UNIMPLEMENTED();\n            *available = true;/;}' src/libANGLE/renderer/metal/QueryMtl.mm
+        }
 
-        -    if (texture.width != width || texture.height != height)
-        +    if (mSwapLayer.contentsScale != mLayer.contentsScale || texture.width != width || texture.height != height)
-             {
-                 stateManager->bindTexture(gl::TextureType::_2D, texture.texture);
-                 functions->texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
-        @@ -269,6 +269,7 @@
-
-                 texture.width  = width;
-                 texture.height = height;
-        +        [mSwapLayer setContentsScale:[mLayer contentsScale]];
-             }
-
-             ASSERT(mFramebufferID ==
-        PATCHEOF
-
-        # Apply patches - use fuzzy matching since line numbers may differ
-        git apply --ignore-whitespace /tmp/metal-freeze.patch || echo "WARN: metal-freeze patch needs manual apply"
-        git apply --ignore-whitespace /tmp/contentscale.patch || echo "WARN: contentscale patch needs manual apply"
-
-        # Verify patches applied
-        echo "=== Checking QueryMtl.mm ==="
-        grep -A2 'UNIMPLEMENTED' src/libANGLE/renderer/metal/QueryMtl.mm | head -5
-        echo "=== Checking WindowSurfaceCGL.mm ==="
-        grep 'contentsScale' src/libANGLE/renderer/gl/cgl/WindowSurfaceCGL.mm | head -5
+        echo "=== Verifying patch ==="
+        grep -A3 'UNIMPLEMENTED' src/libANGLE/renderer/metal/QueryMtl.mm | head -10
 
     - name: Sync dependencies
       run: |
@@ -84,9 +62,9 @@ jobs:
         cat > out/Release/args.gn << 'GNARGS'
         target_cpu="arm64"
         is_debug=false
-        mac_sdk_min="11.0"
-        mac_min_system_version="11.0"
-        mac_deployment_target="11.0"
+        mac_sdk_min="12.0"
+        mac_min_system_version="12.0"
+        mac_deployment_target="12.0"
         angle_enable_metal=true
         angle_enable_swiftshader=false
         angle_enable_vulkan=false
@@ -110,7 +88,8 @@ jobs:
         cp out/Release/libGLESv2.dylib artifacts/
         echo "$(git log -1 --oneline)" > artifacts/BUILD_INFO.txt
         echo "Built: $(date -u)" >> artifacts/BUILD_INFO.txt
-        echo "Patches applied: metal-freeze, contentscale" >> artifacts/BUILD_INFO.txt
+        echo "Patches: metal-freeze workaround (QueryMtl.mm)" >> artifacts/BUILD_INFO.txt
+        echo "Deployment target: macOS 12.0" >> artifacts/BUILD_INFO.txt
 
     - name: Upload ANGLE dylibs
       uses: actions/upload-artifact@v4
