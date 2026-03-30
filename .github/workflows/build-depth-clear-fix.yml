@@ -1,4 +1,4 @@
-name: Build ANGLE with Depth Clear Fix
+name: Build ANGLE with Vulkan Depth Clear Fix
 on:
   push:
     branches:
@@ -52,75 +52,112 @@ jobs:
         PYEOF
         python3 /tmp/patch_metal_freeze.py
 
-    - name: Apply depth clear fix
+    - name: Apply Vulkan depth DontCare fix
       run: |
-        cat > /tmp/patch_depth_clear.py << 'PYEOF'
-        import sys
+        cat > /tmp/patch_vulkan_depth.py << 'PYEOF'
+        import sys, re
 
-        path = "angle/src/libANGLE/renderer/metal/mtl_command_buffer.mm"
+        # ============================================================
+        # FIX: FramebufferVk.cpp - Convert depth DontCare to Clear(1.0)
+        #
+        # When depth content is undefined, ANGLE sets loadOp = DontCare.
+        # On MoltenVK, VK_ATTACHMENT_LOAD_OP_DONT_CARE preserves previous
+        # frame data in tile memory, causing shadow map ghosting.
+        #
+        # Fix: Change DontCare to Clear with depth=1.0 (far plane) so
+        # unrendered shadow texels read as "no shadow" instead of stale.
+        # ============================================================
+
+        path = "angle/src/libANGLE/renderer/vulkan/FramebufferVk.cpp"
         with open(path, "r") as f:
-            content = f.read()
+            lines = f.readlines()
 
-        # Find the RandomizeClearValue specialization for depth attachments.
-        # Original code randomizes clearDepth to a value in [0.0, 1.0].
-        # We change it to always use 1.0 (far plane) so that any shadow map
-        # texels not re-rendered this frame read as "no shadow" instead of
-        # random depth values that cause ghost shadow artifacts.
+        fixes_applied = 0
 
-        # Replace ALL occurrences of randomized depth clear with fixed 1.0.
-        # Patterns found in ANGLE source:
-        #   objCRenderPassAttachment.clearDepth = dist(rd);
-        #   mRenderPassDesc.depthAttachment.clearDepth = dis(gen);
-        # We replace any line containing ".clearDepth = d" (where d is a
-        # distribution call) with ".clearDepth = 1.0"
+        # Find the pattern:
+        #   if (!depthStencilRenderTarget->hasDefinedContent() ||
+        #       depthStencilRenderTarget->isEntirelyTransient())
+        #   {
+        #       depthLoadOp = vk::RenderPassLoadOp::DontCare;
+        #   }
+        #
+        # Replace DontCare with Clear for depth.
 
-        import re
-        # Match any line that assigns clearDepth from a distribution/random call
-        pattern = r'(\.clearDepth\s*=\s*)\w+\(\w+\)'
-        replacement = r'\g<1>1.0  /* FIXED: far plane instead of random */'
-        new_content, count = re.subn(pattern, replacement, content)
+        for i in range(len(lines)):
+            stripped = lines[i].strip()
 
-        if count == 0:
-            # Fallback: try broader pattern
-            pattern2 = r'(\.clearDepth\s*=\s*)[^;]+;'
-            # Only replace lines that look like random assignments (not literal values)
-            lines = content.split('\n')
-            new_lines = []
-            count = 0
-            for line in lines:
-                if '.clearDepth' in line and ('dist(' in line or 'dis(' in line or 'distribution' in line):
-                    # Replace the assignment value with 1.0
-                    new_line = re.sub(r'(\.clearDepth\s*=\s*)[^;]+', r'\g<1>1.0  /* FIXED: far plane */', line)
-                    new_lines.append(new_line)
-                    count += 1
-                    print(f"Fixed: {line.strip()} -> {new_line.strip()}")
-                else:
-                    new_lines.append(line)
-            new_content = '\n'.join(new_lines)
+            # Fix 1: Undefined/transient depth content -> Clear instead of DontCare
+            if (stripped == "depthLoadOp = vk::RenderPassLoadOp::DontCare;"
+                and i >= 2):
+                # Check context: is this the hasDefinedContent / isEntirelyTransient block?
+                context = "".join(lines[max(0,i-5):i])
+                if "hasDefinedContent" in context or "isEntirelyTransient" in context:
+                    indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+                    lines[i] = indent + "depthLoadOp = vk::RenderPassLoadOp::Clear;  // PATCHED: was DontCare, causes ghosting on MoltenVK\n"
+                    fixes_applied += 1
+                    print(f"FIX 1 applied at line {i+1}: depth DontCare -> Clear (undefined content)")
 
-        if count == 0:
-            print("WARNING: No depth clear randomization found, dumping clearDepth context:")
-            for i, line in enumerate(content.split('\n'), 1):
-                if 'clearDepth' in line.lower() or 'cleardepth' in line:
+        # Now ensure the clear value for depth is 1.0 when no deferred clears.
+        # Find the else clause that stores kUninitializedClearValue for depth/stencil
+        # and replace it with a proper depth=1.0 clear value.
+        #
+        # Pattern:
+        #   else
+        #   {
+        #       packedClearValues.storeDepthStencil(depthStencilAttachmentIndex,
+        #                                           kUninitializedClearValue);
+        #   }
+
+        for i in range(len(lines)):
+            if ("packedClearValues.storeDepthStencil" in lines[i]
+                and "kUninitializedClearValue" in lines[i]):
+                # This is the else clause - replace with depth=1.0
+                indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+                # Check if it spans multiple lines
+                block_start = i
+                block_end = i
+                full_stmt = lines[i]
+                while ";" not in full_stmt and block_end < len(lines) - 1:
+                    block_end += 1
+                    full_stmt += lines[block_end]
+
+                # Replace the whole statement
+                replacement = []
+                replacement.append(indent + "// PATCHED: Use depth=1.0 (far plane) instead of uninitialized\n")
+                replacement.append(indent + "VkClearValue depthFarClear = {};\n")
+                replacement.append(indent + "depthFarClear.depthStencil.depth = 1.0f;\n")
+                replacement.append(indent + "depthFarClear.depthStencil.stencil = 0;\n")
+                replacement.append(indent + "packedClearValues.storeDepthStencil(depthStencilAttachmentIndex,\n")
+                replacement.append(indent + "                                    depthFarClear);\n")
+
+                # Replace lines block_start through block_end
+                lines[block_start:block_end+1] = replacement
+                fixes_applied += 1
+                print(f"FIX 2 applied at line {block_start+1}: kUninitializedClearValue -> depth=1.0")
+                break
+
+        if fixes_applied == 0:
+            print("ERROR: No fixes applied! Dumping context...")
+            for i, line in enumerate(lines, 1):
+                if "depthLoadOp" in line and "DontCare" in line:
                     print(f"  Line {i}: {line.rstrip()}")
-            # Don't fail - the fix may not be needed if ANGLE changed the approach
+                if "kUninitializedClearValue" in line:
+                    print(f"  Line {i}: {line.rstrip()}")
+            sys.exit(1)
         else:
-            print(f"Depth clear fix applied: {count} occurrence(s) changed to 1.0")
-
-        content = new_content
+            print(f"\nTotal fixes applied: {fixes_applied}")
 
         with open(path, "w") as f:
-            f.write(content)
-
-        print("Depth clear fix applied: random -> 1.0")
+            f.writelines(lines)
 
         # Verify
+        print("\n=== Verification ===")
         with open(path, "r") as f:
             for i, line in enumerate(f, 1):
-                if "clearDepth" in line:
+                if "PATCHED" in line or "depthFarClear" in line:
                     print(f"  Line {i}: {line.rstrip()}")
         PYEOF
-        python3 /tmp/patch_depth_clear.py
+        python3 /tmp/patch_vulkan_depth.py
 
     - name: Sync dependencies
       run: |
@@ -140,7 +177,7 @@ jobs:
         mac_deployment_target="12.0"
         angle_enable_metal=true
         angle_enable_swiftshader=false
-        angle_enable_vulkan=false
+        angle_enable_vulkan=true
         GNEOF
         gn gen out/Release
         autoninja -C out/Release libEGL libGLESv2
@@ -149,7 +186,7 @@ jobs:
     - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: angle-depth-clear-fix
+        name: angle-vulkan-depth-fix
         path: |
           angle/out/Release/libEGL.dylib
           angle/out/Release/libGLESv2.dylib
