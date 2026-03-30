@@ -22,17 +22,40 @@ jobs:
         cd angle
         echo "Upstream HEAD: $(git log -1 --oneline)"
 
+    - name: Write metal freeze script
+      run: |
+        cat > /tmp/apply_metal_freeze.py << 'SCRIPT_END'
+        import sys
+        path = "angle/src/libANGLE/renderer/metal/QueryMtl.mm"
+        with open(path, "r") as f:
+            content = f.read()
+        fn = content.find("QueryMtl::isResultAvailable")
+        if fn == -1:
+            print("ERROR: isResultAvailable not found")
+            sys.exit(1)
+        marker = "UNIMPLEMENTED();"
+        idx = content.find(marker, fn)
+        if idx != -1:
+            insert_pos = idx + len(marker)
+            nl = content[insert_pos]
+            spaces = ""
+            j = insert_pos + 1
+            while j < len(content) and content[j] == " ":
+                spaces += " "
+                j += 1
+            content = content[:insert_pos] + "\n" + spaces + "*available = true;" + content[insert_pos:]
+            print("Metal freeze patch applied in isResultAvailable")
+        else:
+            print("WARNING: UNIMPLEMENTED not found in isResultAvailable")
+        with open(path, "w") as f:
+            f.write(content)
+        SCRIPT_END
+
     - name: Apply metal freeze patch
       run: |
-        cd angle
-        sed -i '' '/^[[:space:]]*UNIMPLEMENTED();/{
-        N
-        s/UNIMPLEMENTED();\n[[:space:]]*break;/UNIMPLEMENTED();\
-                    *available = true;\
-                    break;/
-        }' src/libANGLE/renderer/metal/QueryMtl.mm
-        echo "Metal freeze patch:"
-        grep -n -A1 'UNIMPLEMENTED' src/libANGLE/renderer/metal/QueryMtl.mm | head -5
+        python3 /tmp/apply_metal_freeze.py
+        echo "Metal freeze patch verify:"
+        grep -n -A2 'UNIMPLEMENTED' angle/src/libANGLE/renderer/metal/QueryMtl.mm
 
     - name: Write shadow fix script
       run: |
