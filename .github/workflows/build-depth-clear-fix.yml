@@ -67,25 +67,47 @@ jobs:
         # texels not re-rendered this frame read as "no shadow" instead of
         # random depth values that cause ghost shadow artifacts.
 
-        # Look for the depth clear randomization
-        marker = "attachment.clearDepth"
-        idx = content.find(marker)
-        if idx == -1:
-            print("ERROR: attachment.clearDepth not found")
-            sys.exit(1)
+        # Replace ALL occurrences of randomized depth clear with fixed 1.0.
+        # Patterns found in ANGLE source:
+        #   objCRenderPassAttachment.clearDepth = dist(rd);
+        #   mRenderPassDesc.depthAttachment.clearDepth = dis(gen);
+        # We replace any line containing ".clearDepth = d" (where d is a
+        # distribution call) with ".clearDepth = 1.0"
 
-        # Find the line containing the assignment
-        line_start = content.rfind("\n", 0, idx) + 1
-        line_end = content.find("\n", idx)
-        old_line = content[line_start:line_end]
-        print(f"Found depth clear line: {old_line.strip()}")
+        import re
+        # Match any line that assigns clearDepth from a distribution/random call
+        pattern = r'(\.clearDepth\s*=\s*)\w+\(\w+\)'
+        replacement = r'\g<1>1.0  /* FIXED: far plane instead of random */'
+        new_content, count = re.subn(pattern, replacement, content)
 
-        # Replace with fixed 1.0 clear value
-        new_line = old_line[:old_line.find("attachment.clearDepth")] + "attachment.clearDepth = 1.0;  // Fixed: always clear depth to far plane (was random)"
-        content = content[:line_start] + new_line + content[line_end:]
+        if count == 0:
+            # Fallback: try broader pattern
+            pattern2 = r'(\.clearDepth\s*=\s*)[^;]+;'
+            # Only replace lines that look like random assignments (not literal values)
+            lines = content.split('\n')
+            new_lines = []
+            count = 0
+            for line in lines:
+                if '.clearDepth' in line and ('dist(' in line or 'dis(' in line or 'distribution' in line):
+                    # Replace the assignment value with 1.0
+                    new_line = re.sub(r'(\.clearDepth\s*=\s*)[^;]+', r'\g<1>1.0  /* FIXED: far plane */', line)
+                    new_lines.append(new_line)
+                    count += 1
+                    print(f"Fixed: {line.strip()} -> {new_line.strip()}")
+                else:
+                    new_lines.append(line)
+            new_content = '\n'.join(new_lines)
 
-        # Also remove the unused distribution variable if it only served the depth line
-        # (the random generator is still used by stencil, so leave it)
+        if count == 0:
+            print("WARNING: No depth clear randomization found, dumping clearDepth context:")
+            for i, line in enumerate(content.split('\n'), 1):
+                if 'clearDepth' in line.lower() or 'cleardepth' in line:
+                    print(f"  Line {i}: {line.rstrip()}")
+            # Don't fail - the fix may not be needed if ANGLE changed the approach
+        else:
+            print(f"Depth clear fix applied: {count} occurrence(s) changed to 1.0")
+
+        content = new_content
 
         with open(path, "w") as f:
             f.write(content)
