@@ -243,7 +243,7 @@ jobs:
         mac_deployment_target="12.0"
         angle_enable_metal=true
         angle_enable_swiftshader=false
-        angle_enable_vulkan=false
+        angle_enable_vulkan=true
         GNEOF
         gn gen out/Release
         autoninja -C out/Release libEGL libGLESv2
