@@ -1,4 +1,4 @@
-name: Build ANGLE with Vulkan Depth Clear Fix
+name: Build ANGLE — Skip All Invalidation on MoltenVK
 on:
   push:
     branches:
@@ -52,100 +52,99 @@ jobs:
         PYEOF
         python3 /tmp/patch_metal_freeze.py
 
-    - name: Apply Vulkan depth DontCare fix
+    - name: Apply skip-all-invalidation patch
       run: |
-        cat > /tmp/patch_vulkan_depth.py << 'PYEOF'
-        import sys, re
+        cat > /tmp/patch_skip_invalidate.py << 'PYEOF'
+        import sys
 
         # ============================================================
-        # FIX: FramebufferVk.cpp - Convert depth DontCare to Clear(1.0)
+        # FIX: vk_helpers.cpp — Skip ALL glInvalidateFramebuffer calls
         #
-        # When depth content is undefined, ANGLE sets loadOp = DontCare.
-        # On MoltenVK, VK_ATTACHMENT_LOAD_OP_DONT_CARE preserves previous
-        # frame data in tile memory, causing shadow map ghosting.
+        # On MoltenVK/Metal TBDR, when ANGLE converts glInvalidateFramebuffer
+        # to VK_ATTACHMENT_STORE_OP_DONT_CARE, tile memory is not stored to
+        # system memory. The next render pass then reads stale data from the
+        # previous frame, causing a full-screen ghost pattern visible against
+        # dark backgrounds.
         #
-        # Fix: Change DontCare to Clear with depth=1.0 (far plane) so
-        # unrendered shadow texels read as "no shadow" instead of stale.
+        # preferSkippingInvalidateForEmulatedFormats only skips invalidation
+        # for emulated-channel color attachments. This patch makes ALL
+        # invalidation skip unconditionally — color (even non-emulated),
+        # depth, and stencil — so no attachment ever gets DontCare from
+        # glInvalidateFramebuffer.
+        #
+        # The performance cost is that ANGLE can't optimize away unused
+        # attachment stores, but this is negligible on Apple Silicon where
+        # tile memory store is fast.
         # ============================================================
 
-        path = "angle/src/libANGLE/renderer/vulkan/FramebufferVk.cpp"
+        path = "angle/src/libANGLE/renderer/vulkan/vk_helpers.cpp"
         with open(path, "r") as f:
             lines = f.readlines()
 
         fixes_applied = 0
 
-        # Find the pattern:
-        #   if (!depthStencilRenderTarget->hasDefinedContent() ||
-        #       depthStencilRenderTarget->isEntirelyTransient())
+        # Find the invalidateEntireContent helper that checks aspect type.
+        # The pattern we're looking for:
+        #
+        #   switch (aspect)
         #   {
-        #       depthLoadOp = vk::RenderPassLoadOp::DontCare;
+        #       case VK_IMAGE_ASPECT_DEPTH_BIT:
+        #           skip = hasEmulatedDepthChannel();
+        #           break;
+        #       case VK_IMAGE_ASPECT_STENCIL_BIT:
+        #           skip = hasEmulatedStencilChannel();
+        #           break;
+        #       case VK_IMAGE_ASPECT_COLOR_BIT:
+        #           skip = hasEmulatedChannels &&
+        #                  contextVk->getFeatures().preferSkippingInvalidateForEmulatedFormats.enabled;
+        #           break;
         #   }
         #
-        # Replace DontCare with Clear for depth.
+        # Replace ALL skip assignments with: skip = true;
 
-        for i in range(len(lines)):
-            stripped = lines[i].strip()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
 
-            # Fix 1: Undefined/transient depth content -> Clear instead of DontCare
-            if (stripped == "depthLoadOp = vk::RenderPassLoadOp::DontCare;"
-                and i >= 2):
-                # Check context: is this the hasDefinedContent / isEntirelyTransient block?
-                context = "".join(lines[max(0,i-5):i])
-                if "hasDefinedContent" in context or "isEntirelyTransient" in context:
-                    indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
-                    lines[i] = indent + "depthLoadOp = vk::RenderPassLoadOp::Clear;  // PATCHED: was DontCare, causes ghosting on MoltenVK\n"
-                    fixes_applied += 1
-                    print(f"FIX 1 applied at line {i+1}: depth DontCare -> Clear (undefined content)")
-
-        # Now ensure the clear value for depth is 1.0 when no deferred clears.
-        # Find the else clause that stores kUninitializedClearValue for depth/stencil
-        # and replace it with a proper depth=1.0 clear value.
-        #
-        # Pattern:
-        #   else
-        #   {
-        #       packedClearValues.storeDepthStencil(depthStencilAttachmentIndex,
-        #                                           kUninitializedClearValue);
-        #   }
-
-        for i in range(len(lines)):
-            if ("packedClearValues.storeDepthStencil" in lines[i]
-                and "kUninitializedClearValue" in lines[i]):
-                # This is the else clause - replace with depth=1.0
-                indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
-                # Check if it spans multiple lines
-                block_start = i
-                block_end = i
-                full_stmt = lines[i]
-                while ";" not in full_stmt and block_end < len(lines) - 1:
-                    block_end += 1
-                    full_stmt += lines[block_end]
-
-                # Replace the whole statement
-                replacement = []
-                replacement.append(indent + "// PATCHED: Use depth=1.0 (far plane) instead of uninitialized\n")
-                replacement.append(indent + "VkClearValue depthFarClear = {};\n")
-                replacement.append(indent + "depthFarClear.depthStencil.depth = 1.0f;\n")
-                replacement.append(indent + "depthFarClear.depthStencil.stencil = 0;\n")
-                replacement.append(indent + "packedClearValues.storeDepthStencil(depthStencilAttachmentIndex,\n")
-                replacement.append(indent + "                                    depthFarClear);\n")
-
-                # Replace lines block_start through block_end
-                lines[block_start:block_end+1] = replacement
+            # Match "skip = hasEmulatedDepthChannel();"
+            if "skip = hasEmulatedDepthChannel();" in line:
+                indent = line[:len(line) - len(line.lstrip())]
+                lines[i] = indent + "skip = true;  // PATCHED: always skip invalidation on MoltenVK\n"
                 fixes_applied += 1
-                print(f"FIX 2 applied at line {block_start+1}: kUninitializedClearValue -> depth=1.0")
-                break
+                print(f"FIX {fixes_applied} at line {i+1}: depth invalidation -> always skip")
 
-        if fixes_applied == 0:
-            print("ERROR: No fixes applied! Dumping context...")
-            for i, line in enumerate(lines, 1):
-                if "depthLoadOp" in line and "DontCare" in line:
-                    print(f"  Line {i}: {line.rstrip()}")
-                if "kUninitializedClearValue" in line:
-                    print(f"  Line {i}: {line.rstrip()}")
-            sys.exit(1)
-        else:
-            print(f"\nTotal fixes applied: {fixes_applied}")
+            # Match "skip = hasEmulatedStencilChannel();"
+            elif "skip = hasEmulatedStencilChannel();" in line:
+                indent = line[:len(line) - len(line.lstrip())]
+                lines[i] = indent + "skip = true;  // PATCHED: always skip invalidation on MoltenVK\n"
+                fixes_applied += 1
+                print(f"FIX {fixes_applied} at line {i+1}: stencil invalidation -> always skip")
+
+            # Match the color case: "skip = hasEmulatedChannels &&"
+            # followed by "contextVk->getFeatures().preferSkippingInvalidateForEmulatedFormats.enabled;"
+            elif "skip = hasEmulatedChannels &&" in line:
+                indent = line[:len(line) - len(line.lstrip())]
+                lines[i] = indent + "skip = true;  // PATCHED: always skip invalidation on MoltenVK\n"
+                # Remove the continuation line
+                if i + 1 < len(lines) and "preferSkippingInvalidateForEmulatedFormats" in lines[i+1]:
+                    lines[i+1] = ""
+                fixes_applied += 1
+                print(f"FIX {fixes_applied} at line {i+1}: color invalidation -> always skip")
+
+            i += 1
+
+        if fixes_applied < 3:
+            print(f"WARNING: Only {fixes_applied}/3 fixes applied. Dumping context...")
+            with open(path, "r") as f:
+                for i, line in enumerate(f, 1):
+                    if "hasEmulated" in line and "skip" in line:
+                        print(f"  Line {i}: {line.rstrip()}")
+                    if "preferSkippingInvalidate" in line:
+                        print(f"  Line {i}: {line.rstrip()}")
+            if fixes_applied == 0:
+                sys.exit(1)
+
+        print(f"\nTotal fixes applied: {fixes_applied}")
 
         with open(path, "w") as f:
             f.writelines(lines)
@@ -154,10 +153,10 @@ jobs:
         print("\n=== Verification ===")
         with open(path, "r") as f:
             for i, line in enumerate(f, 1):
-                if "PATCHED" in line or "depthFarClear" in line:
+                if "PATCHED" in line:
                     print(f"  Line {i}: {line.rstrip()}")
         PYEOF
-        python3 /tmp/patch_vulkan_depth.py
+        python3 /tmp/patch_skip_invalidate.py
 
     - name: Sync dependencies
       run: |
@@ -186,7 +185,7 @@ jobs:
     - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: angle-vulkan-depth-fix
+        name: angle-skip-invalidation
         path: |
           angle/out/Release/libEGL.dylib
           angle/out/Release/libGLESv2.dylib
